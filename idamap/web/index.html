@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>idamap</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23141922'/%3E%3Crect x='2' y='2' width='5' height='5' fill='%233fbf74'/%3E%3Crect x='9' y='2' width='5' height='5' fill='%23b67cf0'/%3E%3Crect x='2' y='9' width='5' height='5' fill='%23e0a83a'/%3E%3Crect x='9' y='9' width='5' height='5' fill='%233aa0d8'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo"><i></i><i></i><i></i><i></i></span>idamap</div>
+  <div class="dbpick">
+    <select id="dbSelect" title="Database"></select>
+    <span id="dbMeta" class="muted mono small"></span>
+  </div>
+  <div id="miniBar" class="minibar" title="Coverage"></div>
+  <div class="spacer"></div>
+  <label class="toggle small" title="Switch to the database the LLM is working on">
+    <input type="checkbox" id="followDb" checked> follow active DB
+  </label>
+  <span id="liveDot" class="live off" title="Live stream">LIVE</span>
+  <div class="menu">
+    <button id="exportBtn" class="btn">Export ▾</button>
+    <div id="exportMenu" class="menu-pop" hidden>
+      <a id="exReport" download>Markdown research log</a>
+      <a id="exSync" download>IDA coverage sync script (.py)</a>
+      <button id="exRename">Rename this database…</button>
+      <button id="exDelete" class="danger">Delete this database's records…</button>
+    </div>
+  </div>
+  <button id="themeBtn" class="btn icon" title="Toggle theme">◐</button>
+</header>
+
+<div id="nowBar" class="nowbar idle">
+  <span class="spin"></span>
+  <span id="nowText" class="now-text">Waiting for ida-mcp activity…</span>
+</div>
+
+<nav class="tabs" id="tabs">
+  <button data-tab="overview" class="active">Overview</button>
+  <button data-tab="map">Coverage map</button>
+  <button data-tab="graph">Call graph</button>
+  <button data-tab="functions">Functions</button>
+  <button data-tab="timeline">Timeline</button>
+</nav>
+
+<main id="main">
+  <section id="tab-overview" class="tab active"></section>
+
+  <section id="tab-map" class="tab">
+    <div class="toolbar">
+      <div class="seg" id="mapMode">
+        <button data-mode="stage" class="active">Stage</button>
+        <button data-mode="heat">Heat</button>
+        <button data-mode="recency">Recency</button>
+        <button data-mode="human">Human review</button>
+      </div>
+      <input id="mapSearch" class="search" placeholder="highlight name / 0xaddr…">
+      <div id="mapLegend" class="legend"></div>
+    </div>
+    <div class="card pad0">
+      <div class="band-wrap"><canvas id="band" height="34"></canvas><div id="bandSegs" class="band-segs"></div></div>
+    </div>
+    <div class="card pad0 grid-card"><canvas id="grid"></canvas></div>
+    <div id="mapTip" class="tip" hidden></div>
+  </section>
+
+  <section id="tab-graph" class="tab">
+    <div class="toolbar">
+      <div class="seg" id="graphMode">
+        <button data-mode="touched" class="active">Worked on</button>
+        <button data-mode="frontier">+ unexplored neighbours</button>
+      </div>
+      <div class="seg" id="graphLayout">
+        <button data-layout="cose" class="active">Organic</button>
+        <button data-layout="breadthfirst">Tree</button>
+        <button data-layout="concentric">Rings</button>
+      </div>
+      <label class="toggle"><input type="checkbox" id="graphTrail"> exploration order</label>
+      <label class="toggle"><input type="checkbox" id="graphFollow" checked> follow live</label>
+      <button id="graphFit" class="btn">Fit</button>
+      <span id="graphInfo" class="muted small"></span>
+      <div class="legend" id="graphLegend"></div>
+    </div>
+    <div id="cy" class="card cy"></div>
+  </section>
+
+  <section id="tab-functions" class="tab">
+    <div class="toolbar">
+      <input id="fnSearch" class="search" placeholder="filter name / 0xaddr / note…">
+      <div id="fnStages" class="chips"></div>
+      <select id="fnHuman"><option value="">any review state</option></select>
+      <span id="fnCount" class="muted small"></span>
+    </div>
+    <div class="card pad0 table-wrap">
+      <table class="tbl" id="fnTable">
+        <thead><tr>
+          <th data-sort="name">Function</th><th data-sort="addr">Address</th><th data-sort="size" class="num">Size</th>
+          <th data-sort="stage">Stage</th><th>Coverage</th><th data-sort="touches" class="num">Calls</th>
+          <th data-sort="last">Last touched</th><th data-sort="human">Review</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <button id="fnMore" class="btn more" hidden>Show more</button>
+    </div>
+  </section>
+
+  <section id="tab-timeline" class="tab">
+    <div class="toolbar">
+      <input id="tlSearch" class="search" placeholder="filter tool / target / intent…">
+      <div id="tlCats" class="chips"></div>
+      <label class="toggle"><input type="checkbox" id="tlErrors"> errors only</label>
+      <label class="toggle"><input type="checkbox" id="tlOldest"> oldest first</label>
+    </div>
+    <div id="timeline" class="timeline"></div>
+    <button id="tlMore" class="btn more" hidden>Load older</button>
+  </section>
+</main>
+
+<aside id="drawer" class="drawer" aria-hidden="true">
+  <button class="close" id="drawerClose" title="Close (Esc)">✕</button>
+  <div id="drawerBody"></div>
+</aside>
+
+<script src="vendor/cytoscape.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

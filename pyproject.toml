@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "idamap"
+version = "0.1.0"
+description = "Record, map and visualise what an LLM does with ida-mcp"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+idamap = "idamap.cli:main"
+
+[tool.setuptools]
+packages = ["idamap"]
+
+[tool.setuptools.package-data]
+idamap = ["web/*", "web/vendor/*", "ida_scripts/*.py"]

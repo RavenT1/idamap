@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+*.i64
+*.idb
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+.DS_Store
