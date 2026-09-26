@@ -15,6 +15,11 @@
 - UI: client (harness) shown per session and call, prompt-less sessions grouped into work blocks, demangled
   names, explanations, references, settings panel.
 - Security: the web UI rejects foreign `Host` headers (DNS rebinding) and cross-origin / non-JSON writes.
+- **One record per binary**: IDBs of the same input (same SHA-256) share one research record, so re-creating
+  or moving an IDB keeps history, notes and explanations. Existing split records are merged on upgrade.
+- LLM-suggested names are shown next to IDA auto-names (`sub_…  bc_program_exec?`) until you rename.
+- Large binaries: gzip for big API responses (full function list of a 115k-function app: 13 MB → 1.3 MB) and a
+  much faster coverage map (≈90 ms redraw for 115k functions, live redraws throttled).
 - Default UI port is now 8777 (8765 is `ida-mcp serve-http`'s default).
 - The proxy exits cleanly with ida-mcp's exit code if ida-mcp dies, recording in-flight calls as failed.
 

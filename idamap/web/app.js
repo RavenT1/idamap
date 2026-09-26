@@ -158,9 +158,11 @@ function ingestFunctions(res, reset) {
   if (reset) state.funcs.clear();
   let structural = reset;
   for (const r of res.functions) {
-    const [start, name, size, flags, touches, last, first, human, orig, note, dem, summary, annStatus] = r;
-    if (!state.funcs.has(start)) structural = true;
-    state.funcs.set(start, { start, name, size, flags, touches, last, first, human, orig, note, dem, summary, annStatus, n: addrNum(start) });
+    const [start, name, size, flags, touches, last, first, human, orig, note, dem, summary, annStatus, suggested] = r;
+    const rec = { start, name, size, flags, touches, last, first, human, orig, note, dem, summary, annStatus, suggested };
+    const cur = state.funcs.get(start);
+    if (cur) Object.assign(cur, rec);  // update in place: cached map groups hold these objects
+    else { structural = true; state.funcs.set(start, { ...rec, n: addrNum(start) }); }
   }
   if (structural) state.order = [...state.funcs.values()].sort((a, b) => (a.n < b.n ? -1 : a.n > b.n ? 1 : 0)).map((f) => f.start);
   state.funcsNow = res.now;
@@ -205,7 +207,7 @@ function onCalls(calls) {
   timelineLive(calls.filter((c) => c.db_id === state.db));
   refreshSummary();
   if (state.tab === "graph") graphPulse();
-  if (state.tab === "map") drawMap();
+  if (state.tab === "map") drawMapSoon();
 }
 
 let needPrompts = false;
@@ -262,6 +264,13 @@ const MANGLED = /^_*(\$[sS]|T0|Z[NLS]?\d|\?)/;
 function displayName(name, dem) { return dem && MANGLED.test(name || "") ? dem : name; }
 function fnDisplay(f) { return displayName(f.name, f.dem); }
 function fnName(start) { const f = state.funcs.get(start); return f ? fnDisplay(f) : start; }
+// IDA auto-names carry no meaning: show the LLM's suggested name next to them (marked as a guess)
+const AUTONAME = /^(sub|j_sub|nullsub|loc|unknown_libname)_[0-9A-Fa-f]+/;
+function suggestionTag(f) {
+  if (!f?.suggested || !AUTONAME.test(f.name || "") || f.suggested === f.name) return null;
+  return h("span", { class: "sugg", title: f.annStatus === "confirmed" ? "name suggested by the LLM, explanation confirmed" : "name suggested by the LLM (unconfirmed)" },
+    f.suggested, f.annStatus === "confirmed" ? "" : "?");
+}
 
 function updateNowBar() {
   const bar = $("#nowBar"), txt = $("#nowText");
@@ -295,7 +304,7 @@ function fnLink(start, name) {
   return h("span", { class: "fn", title: f && label !== f.name ? `${f.name}\n${start}` : start,
     onclick: (e) => { e.stopPropagation(); openFunction(start); } },
     h("span", { class: "dot", style: { background: stColor(stageOf(f?.flags || 0)) } }),
-    h("span", { class: "fname" }, label));
+    h("span", { class: "fname" }, label), suggestionTag(f));
 }
 
 // ------------------------------------------------------------------ tabs
@@ -473,7 +482,21 @@ function copy(text, btn) {
 // ------------------------------------------------------------------ coverage map
 const mapState = { mode: store.get("mapMode", "stage"), hidden: new Set(), search: "", layout: null, tile: 10 };
 
+// getComputedStyle is slow: resolve theme colours once per draw, not once per tile (100k+ tiles)
+let colorCache = null;
+function cachedColors() {
+  if (!colorCache) {
+    colorCache = { st: Object.fromEntries(STAGES.map((s) => [s, stColor(s)])), hu: Object.fromEntries(HUMAN.map((s) => [s, huColor(s)])),
+      text: css("--text"), accent: css("--accent"), muted: css("--muted") };
+    queueMicrotask(() => { colorCache = null; });  // theme may change between draws
+  }
+  return colorCache;
+}
+
 function mapColor(f) {
+  const C = cachedColors();
+  const stColor = (s) => C.st[s];
+  const huColor = (s) => C.hu[s];
   const st = stageOf(f.flags);
   switch (mapState.mode) {
     case "heat": {
@@ -523,7 +546,17 @@ function renderMapLegend() {
   }
 }
 
+// Grouping 100k functions into segments is not free: redo it only when the function set or segments change.
 function segmentsForMap() {
+  const sl = state.summary?.segments || [];
+  const segKey = sl.map((x) => x.start + "-" + x.end).join(",");  // summary is refetched often; compare content
+  if (mapState.blocksFor?.order === state.order && mapState.blocksFor?.segKey === segKey) return mapState.blocksFor.value;
+  const value = computeSegmentsForMap();
+  mapState.blocksFor = { order: state.order, segKey, value };
+  return value;
+}
+
+function computeSegmentsForMap() {
   const segs = (state.summary?.segments || []).map((s) => ({ ...s, s: addrNum(s.start), e: addrNum(s.end) }));
   const fns = state.order.map((k) => state.funcs.get(k));
   if (!segs.length) {
@@ -560,44 +593,86 @@ function layoutMap() {
     lay.push({ ...b, y0: y + 18, rows });
     y += 18 + rows * step + 12;
   }
-  mapState.layout = { blocks: lay, tile, step, cols, width, height: Math.max(y, 40) };
+  mapState.layout = { blocks: lay, tile, gap, step, cols, width, height: Math.max(y, 40) };
   const dpr = window.devicePixelRatio || 1;
   grid.width = width * dpr; grid.height = mapState.layout.height * dpr;
   grid.style.width = width + "px"; grid.style.height = mapState.layout.height + "px";
   renderMapLegend();
 }
 
+// CSS colour string -> [r, g, b, a] (0-255), memoised; used to write tiles straight into ImageData
+const rgbaCache = new Map();
+function rgba(color) {
+  let v = rgbaCache.get(color);
+  if (!v) {
+    const c = rgba.ctx || (rgba.ctx = Object.assign(document.createElement("canvas"), { width: 1, height: 1 }).getContext("2d", { willReadFrequently: true }));
+    c.clearRect(0, 0, 1, 1);
+    c.fillStyle = color;
+    c.fillRect(0, 0, 1, 1);
+    v = c.getImageData(0, 0, 1, 1).data;
+    if (rgbaCache.size > 4096) rgbaCache.clear();
+    rgbaCache.set(color, v);
+  }
+  return v;
+}
+
 function drawMap() {
   if (state.tab !== "map" || !mapState.layout) return;
   drawBand();
   const L = mapState.layout, grid = $("#grid"), ctx = grid.getContext("2d");
+  const C = cachedColors();
   const dpr = window.devicePixelRatio || 1;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, L.width, L.height);
+  // 1) tiles. Large binaries (small tiles, no gaps): one pixel per function in a tiny image, scaled up
+  //    by the GPU. 100k+ individual fillRect calls or a full-resolution pixel buffer are too slow.
+  if (L.gap === 0) {
+    const off = drawMap.off || (drawMap.off = document.createElement("canvas"));
+    ctx.imageSmoothingEnabled = false;
+    for (const b of L.blocks) {
+      if (!b.fns.length) continue;
+      off.width = L.cols; off.height = b.rows;
+      const octx = off.getContext("2d");
+      const img = octx.createImageData(L.cols, b.rows), px = img.data;
+      b.fns.forEach((f, i) => {
+        const [r, g, bl, a] = rgba(mapColor(f));
+        const o = i * 4;
+        px[o] = r; px[o + 1] = g; px[o + 2] = bl; px[o + 3] = mapVisible(f) ? a : Math.round(a * 0.12);
+      });
+      octx.putImageData(img, 0, 0);
+      ctx.drawImage(off, 0, b.y0, L.cols * L.step, b.rows * L.step);
+    }
+  } else {
+    for (const b of L.blocks) {
+      b.fns.forEach((f, i) => {
+        ctx.globalAlpha = mapVisible(f) ? 1 : 0.12;
+        ctx.fillStyle = mapColor(f);
+        ctx.fillRect((i % L.cols) * L.step, b.y0 + Math.floor(i / L.cols) * L.step, L.tile, L.tile);
+      });
+    }
+    ctx.globalAlpha = 1;
+  }
+  // 2) labels and the few highlighted tiles on top
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const active = state.lastActive?.db === state.db ? state.lastActive.func : null;
   const running = new Set([...state.running.values()].filter((c) => c.db_id === state.db && c.func).map((c) => c.func));
   ctx.font = "11px " + css("--mono");
   for (const b of L.blocks) {
-    ctx.fillStyle = css("--muted");
+    ctx.fillStyle = C.muted;
     ctx.fillText(`${b.name}  ${b.fns.length ? b.fns.length + " functions" : ""}${b.start ? "  " + b.start : ""}`, 0, b.y0 - 6);
     b.fns.forEach((f, i) => {
+      const hit = mapState.search && mapMatches(f), live = f.start === active || running.has(f.start);
+      const mark = f.human && mapState.mode !== "human" && L.tile >= 8;
+      if (!hit && !live && !mark) return;
       const x = (i % L.cols) * L.step, y = b.y0 + Math.floor(i / L.cols) * L.step;
-      ctx.globalAlpha = mapVisible(f) ? 1 : 0.12;
-      ctx.fillStyle = mapColor(f);
-      ctx.fillRect(x, y, L.tile, L.tile);
-      if (mapMatches(f)) { ctx.globalAlpha = 1; ctx.strokeStyle = css("--text"); ctx.lineWidth = 1.5; ctx.strokeRect(x - 1, y - 1, L.tile + 2, L.tile + 2); }
-      if (f.start === active || running.has(f.start)) {
-        ctx.globalAlpha = 1; ctx.strokeStyle = css("--accent"); ctx.lineWidth = 2;
-        ctx.strokeRect(x - 2, y - 2, L.tile + 4, L.tile + 4);
-      }
-      if (f.human && mapState.mode !== "human" && L.tile >= 8) {
-        ctx.globalAlpha = 1; ctx.fillStyle = huColor(f.human);
-        ctx.fillRect(x + L.tile - 3, y, 3, 3);
-      }
+      if (hit) { ctx.strokeStyle = C.text; ctx.lineWidth = 1.5; ctx.strokeRect(x - 1, y - 1, L.tile + 2, L.tile + 2); }
+      if (live) { ctx.strokeStyle = C.accent; ctx.lineWidth = 2; ctx.strokeRect(x - 2, y - 2, L.tile + 4, L.tile + 4); }
+      if (mark) { ctx.fillStyle = C.hu[f.human]; ctx.fillRect(x + L.tile - 3, y, 3, 3); }
     });
   }
-  ctx.globalAlpha = 1;
 }
+
+const drawMapSoon = throttle(() => drawMap(), 500);
 
 function mapHit(ev) {
   const L = mapState.layout;
@@ -667,7 +742,7 @@ function showTip(ev, f) {
   const tip = $("#mapTip");
   if (!f) { tip.hidden = true; return; }
   fill(tip, 
-    h("b", null, fnDisplay(f)), h("div", { class: "muted mono small" }, `${f.start}${f.size ? ` · ${f.size} bytes` : ""}`),
+    h("b", null, fnDisplay(f)), suggestionTag(f), h("div", { class: "muted mono small" }, `${f.start}${f.size ? ` · ${f.size} bytes` : ""}`),
     fnDisplay(f) !== f.name ? h("div", { class: "faint small mono raw" }, f.name) : f.dem && f.dem !== f.name ? h("div", { class: "muted small mono" }, f.dem) : null,
     f.orig ? h("div", { class: "faint small" }, `was ${f.orig}`) : null,
     f.summary ? h("div", { class: "tip-summary" }, f.summary, f.annStatus === "confirmed" ? " ✓" : "") : null,
@@ -697,7 +772,7 @@ async function loadGraph(force) {
 function nodeData(n) {
   const f = state.funcs.get(n.id);
   const flags = f ? f.flags : n.flags;
-  const label = f ? fnDisplay(f) : n.name;
+  const label = f ? (f.suggested && AUTONAME.test(f.name) ? `${f.suggested}?` : fnDisplay(f)) : n.name;
   return { id: n.id, label: label.length > 44 ? label.slice(0, 42) + "…" : label, stage: stageOf(flags), color: stColor(stageOf(flags)),
     w: 16 + Math.min(34, 7 * Math.log2(1 + (f?.touches ?? n.touches))), frontier: n.frontier ? 1 : 0,
     human: f?.human || n.human || "", hcolor: (f?.human || n.human) ? huColor(f?.human || n.human) : "transparent" };
@@ -793,7 +868,7 @@ function renderFunctions() {
   fill(body, ...rows.slice(0, fnState.limit).map((f) => {
     const st = stageOf(f.flags);
     return h("tr", { onclick: () => openFunction(f.start) },
-      h("td", null, h("span", { class: "fn" }, h("span", { class: "dot", style: { background: stColor(st) } }), h("span", { class: "fname" }, fnDisplay(f))),
+      h("td", null, h("span", { class: "fn" }, h("span", { class: "dot", style: { background: stColor(st) } }), h("span", { class: "fname" }, fnDisplay(f)), suggestionTag(f)),
         f.orig ? h("span", { class: "was" }, `was ${f.orig}`) : null, f.note ? h("span", { class: "faint", title: "has note" }, " ✎") : null,
         fnDisplay(f) !== f.name ? h("div", { class: "dem" }, f.name) : f.dem && f.dem !== f.name ? h("div", { class: "dem" }, f.dem) : null,
         f.summary ? h("div", { class: "fn-summary", title: f.summary }, f.annStatus === "confirmed" ? "✓ " : "", f.summary) : null),

@@ -108,6 +108,12 @@ CREATE TABLE IF NOT EXISTS databases (
     last_seen REAL
 );
 
+-- other IDB paths of the same binary (same input SHA-256) merged into one research record
+CREATE TABLE IF NOT EXISTS db_aliases (
+    key TEXT PRIMARY KEY,
+    db_id INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,               -- Claude Code session_id / proxy session id
     harness TEXT,                      -- client that drove ida-mcp (claude-code, cursor, codex, ...)
@@ -288,6 +294,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
                     "WHERE source IS NULL").rowcount:
         conn.execute("UPDATE calls SET harness=(SELECT harness FROM sessions s WHERE s.id=calls.session_id) "
                      "WHERE harness IS NULL")
+    # older versions kept one record per IDB path; fold records of the same binary together
+    dups = conn.execute("SELECT sha256, min(id) AS keep FROM databases WHERE sha256 IS NOT NULL "
+                        "GROUP BY sha256 HAVING count(*) > 1").fetchall()
+    if dups:
+        from .ingest import merge_databases
+
+        for d in dups:
+            for r in conn.execute("SELECT id FROM databases WHERE sha256=? AND id != ?", (d[0], d[1])).fetchall():
+                merge_databases(conn, d[1], r[0])
     conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES ('schema', ?)", (str(SCHEMA_VERSION),))
 
 

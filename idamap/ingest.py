@@ -30,7 +30,8 @@ def _db_name(key: str) -> str:
 
 def upsert_database(conn: sqlite3.Connection, key: str, meta: dict | None = None) -> int:
     ts = S.now()
-    row = conn.execute("SELECT id FROM databases WHERE key=?", (key,)).fetchone()
+    row = conn.execute("SELECT id FROM databases WHERE key=?", (key,)).fetchone() or \
+        conn.execute("SELECT db_id AS id FROM db_aliases WHERE key=?", (key,)).fetchone()
     if row:
         db_id = row["id"]
         conn.execute("UPDATE databases SET last_seen=? WHERE id=?", (ts, db_id))
@@ -39,11 +40,13 @@ def upsert_database(conn: sqlite3.Connection, key: str, meta: dict | None = None
             "INSERT INTO databases(key, name, created_at, last_seen) VALUES (?,?,?,?)",
             (key, _db_name(key), ts, ts)).lastrowid
     if meta:
-        update_db_meta(conn, db_id, meta)
+        db_id = update_db_meta(conn, db_id, meta)
     return db_id
 
 
-def update_db_meta(conn, db_id: int, meta: dict) -> None:
+def update_db_meta(conn, db_id: int, meta: dict) -> int:
+    """Store metadata; returns the database id to use from now on (it changes if a known
+    binary is recognised by its SHA-256 and the two records are merged)."""
     cols = ["idb_path", "input_path", "sha256", "md5", "processor", "bits", "file_type",
             "min_ea", "max_ea", "func_total"]
     sets, vals = [], []
@@ -54,6 +57,75 @@ def update_db_meta(conn, db_id: int, meta: dict) -> None:
             vals.append(v)
     if sets:
         conn.execute(f"UPDATE databases SET {', '.join(sets)} WHERE id=?", (*vals, db_id))
+    sha = meta.get("sha256")
+    if sha:
+        other = conn.execute("SELECT id FROM databases WHERE sha256=? AND id != ? ORDER BY id LIMIT 1",
+                             (sha, db_id)).fetchone()
+        if other:
+            keep, drop = min(other["id"], db_id), max(other["id"], db_id)
+            merge_databases(conn, keep, drop)
+            return keep
+    return db_id
+
+
+def merge_databases(conn, keep: int, drop: int) -> None:
+    """Fold everything recorded for `drop` into `keep` (same binary, another IDB path)."""
+    ts = S.now()
+    conn.execute(
+        """INSERT INTO functions(db_id, start_i, start, name, orig_name, demangled, is_lib, size, flags,
+                                 touch_count, first_touched, last_touched, human_status, note, note_updated, updated_at)
+           SELECT ?, start_i, start, name, orig_name, demangled, is_lib, size, flags, touch_count, first_touched,
+                  last_touched, human_status, note, note_updated, ?
+           FROM functions WHERE db_id=?
+           ON CONFLICT(db_id, start_i) DO UPDATE SET
+             name=COALESCE(functions.name, excluded.name),
+             orig_name=COALESCE(functions.orig_name, excluded.orig_name),
+             demangled=COALESCE(functions.demangled, excluded.demangled),
+             is_lib=COALESCE(functions.is_lib, excluded.is_lib),
+             size=COALESCE(functions.size, excluded.size),
+             flags=functions.flags | excluded.flags,
+             touch_count=functions.touch_count + excluded.touch_count,
+             first_touched=MIN(COALESCE(functions.first_touched, excluded.first_touched), COALESCE(excluded.first_touched, functions.first_touched)),
+             last_touched=MAX(COALESCE(functions.last_touched, 0), COALESCE(excluded.last_touched, 0)),
+             human_status=COALESCE(functions.human_status, excluded.human_status),
+             note=CASE WHEN functions.note IS NULL OR functions.note = '' THEN excluded.note
+                       WHEN excluded.note IS NULL OR excluded.note = '' OR excluded.note = functions.note THEN functions.note
+                       ELSE functions.note || char(10) || excluded.note END,
+             updated_at=excluded.updated_at""",
+        (keep, ts, drop))
+    conn.execute("DELETE FROM functions WHERE db_id=?", (drop,))
+    for table in ("edges", "func_refs", "segments"):  # primary keys include db_id: skip duplicates
+        conn.execute(f"UPDATE OR IGNORE {table} SET db_id=? WHERE db_id=?", (keep, drop))
+        conn.execute(f"DELETE FROM {table} WHERE db_id=?", (drop,))
+    for table in ("calls", "touches", "renames", "comments", "annotations", "workspace_ids"):
+        conn.execute(f"UPDATE {table} SET db_id=? WHERE db_id=?", (keep, drop))
+    conn.execute("UPDATE sessions SET db_id=? WHERE db_id=?", (keep, drop))
+    d = conn.execute("SELECT * FROM databases WHERE id=?", (drop,)).fetchone()
+    k = conn.execute("SELECT * FROM databases WHERE id=?", (keep,)).fetchone()
+    conn.execute("INSERT OR REPLACE INTO db_aliases(key, db_id) VALUES (?,?)", (d["key"], keep))
+    conn.execute("UPDATE db_aliases SET db_id=? WHERE db_id=?", (keep, drop))
+    for col in ("idb_path", "input_path", "md5", "processor", "bits", "file_type", "min_ea", "max_ea",
+                "func_total", "map_imported_at", "label"):
+        if k[col] is None and d[col] is not None:
+            conn.execute(f"UPDATE databases SET {col}=? WHERE id=?", (d[col], keep))
+    conn.execute("UPDATE databases SET last_seen=MAX(last_seen, ?) WHERE id=?", (d["last_seen"] or 0, keep))
+    conn.execute("DELETE FROM databases WHERE id=?", (drop,))
+
+
+def file_sha256(path: str | None, limit: int = 2 * 1024 ** 3) -> str | None:
+    """SHA-256 of a raw input binary (equals IDA's recorded input hash)."""
+    import hashlib
+
+    try:
+        if not path or path.lower().endswith((".i64", ".idb")) or os.path.getsize(path) > limit:
+            return None
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
 
 
 def _touch_session(conn, payload: dict) -> dict:
@@ -226,7 +298,7 @@ def import_export(conn, path: str, db_id: int | None = None) -> dict:
                            (key, data.get("sha256"))).fetchone()
         db_id = row["id"] if row else upsert_database(conn, key)
     funcs = data.get("functions") or []
-    update_db_meta(conn, db_id, {
+    db_id = update_db_meta(conn, db_id, {
         "idb_path": data.get("idb_path"), "input_path": data.get("input_path"),
         "sha256": data.get("sha256"), "md5": data.get("md5"), "processor": data.get("processor"),
         "bits": data.get("bits"), "file_type": data.get("file_type"),
@@ -395,13 +467,16 @@ def on_post(conn, payload: dict, ok: bool) -> None:
             key = m.get("idb_path") or m.get("input_path") or "unknown"
             if tool == "open_dsc" and m.get("module"):
                 key = f"{m.get('input_path')}::{m.get('module')}"
+            if tool == "open_idb" and not m.get("sha256"):
+                m["sha256"] = file_sha256(m.get("input_path"))  # lets another IDB of this binary merge now
             db_id = upsert_database(conn, key, m)
             conn.execute("UPDATE sessions SET db_id=? WHERE id=?", (db_id, session["id"]))
             if m.get("workspace_id"):
                 conn.execute("INSERT OR REPLACE INTO workspace_ids(ws_id, db_id) VALUES (?,?)",
                              (str(m["workspace_id"]), db_id))
         elif facts.db_meta:
-            update_db_meta(conn, db_id, facts.db_meta)
+            db_id = update_db_meta(conn, db_id, facts.db_meta)
+            conn.execute("UPDATE sessions SET db_id=? WHERE id=?", (db_id, session["id"]))
         conn.execute("UPDATE databases SET last_seen=? WHERE id=?", (ts, db_id))
 
         if facts.segments:

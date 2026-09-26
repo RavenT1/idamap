@@ -9,7 +9,7 @@ Windsurf, Zed, Cline, … — through a transparent proxy, with no changes to id
 
 > Türkçe: [README.tr.md](README.tr.md)
 
-![Overview](docs/overview.png)
+![Overview: coverage, focus trail with the LLM's suggested names, tool usage](docs/overview.jpg)
 
 ## Why
 
@@ -25,6 +25,13 @@ scratch. idamap keeps a durable corpus of that work and shows it:
 | **Functions** | Sortable, searchable table (names, demangled names, explanations, coverage, review status) |
 | **Timeline** | Your prompt → what the model said it was about to do → the calls it made, with inputs and outputs |
 | **Function panel** | Renames, comments, LLM explanations, referenced strings / selectors / classes / imports, callers / callees, latest pseudocode, full history, and your own review status and notes |
+
+<table>
+<tr><td><img src="docs/call-graph.jpg" alt="Call graph with exploration order"></td>
+<td><img src="docs/function-panel.jpg" alt="Function panel with an LLM explanation to confirm or reject"></td></tr>
+<tr><td><img src="docs/timeline.jpg" alt="Timeline with an idamap_annotate call expanded"></td>
+<td><img src="docs/coverage-map.jpg" alt="Coverage map"></td></tr>
+</table>
 
 Coverage stages: `seen` (appeared in a result) → `explored` (xrefs / callers / callees) → `disassembled` →
 `decompiled` → `annotated` (renamed, commented, typed, patched or explained).
@@ -148,7 +155,10 @@ Each call's input and output are parsed into facts: function records, call edges
 renames, comments, segments, database metadata. ida-mcp's single-target (plain payload) and batch
 (`{"results": [...]}`) response shapes are both understood. Targets that are not known functions yet are kept as
 stubs and merged once the real function appears. Multiple databases are tracked per session, including
-ida-mcp `--workspace` `database_id`s. Addresses are 64-bit safe (e.g. iOS kernelcache addresses).
+ida-mcp `--workspace` `database_id`s. Records are **per binary**: another IDB of the same input (same SHA-256)
+continues the same record. Addresses are 64-bit safe (e.g. iOS kernelcache addresses).
+
+Tested with a 115k-function iOS app (385k call edges): full-map export ≈ 23 s in IDA, UI stays interactive.
 
 ## Security and privacy
 

@@ -9,6 +9,8 @@ VS Code / Copilot, Gemini CLI, Windsurf, Zed, Cline, … ida-mcp'ye veya IDA'ya 
 
 > English: [README.md](README.md)
 
+![Genel bakış](docs/overview.jpg)
+
 ## Neden
 
 MCP üzerinden IDA'yı kullanan bir LLM saniyede birkaç çağrı yapar. Terminal akışını takip etmek imkânsızdır,

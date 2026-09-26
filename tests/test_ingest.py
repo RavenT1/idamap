@@ -194,6 +194,46 @@ class IngestTests(unittest.TestCase):
         self.assertTrue(self.h.func(CHECK)["flags"] & store.F_SEEN)
 
 
+    def test_same_binary_in_two_idbs_is_one_record(self):
+        raw = Path(self.tmp.name) / "app"
+        raw.write_bytes(b"\xcf\xfa\xed\xfe" + b"x" * 100)
+        db1 = self.h.call("open_idb", {"path": "/x/t"}, {"path": "/x/t.i64"})["db_id"]
+        self.h.call("idb_meta", {}, {"sha256": __import__("hashlib").sha256(raw.read_bytes()).hexdigest()})
+        self.h.call("list_functions", {}, LIST_FUNCS)
+        self.h.call("decompile", {"address": "0x100000514"}, MAIN_DECOMP)
+        from idamap import queries
+        queries.set_human(self.conn, db1, MAIN, note="first IDB note", set_note=True)
+        # the same binary opened from another place creates another IDB path
+        c = self.h.call("open_idb", {"path": str(raw)}, {"path": str(raw) + ".i64"})
+        self.assertEqual(c["db_id"], db1)
+        self.h.call("rename", {"address": "0x1000004b0", "name": "decrypt_buf"},
+                    {"address": "0x1000004b0", "name": "decrypt_buf"})
+        dbs = self.conn.execute("SELECT id FROM databases").fetchall()
+        self.assertEqual([r[0] for r in dbs], [db1])
+        f = self.h.func(MAIN, db1)
+        self.assertEqual((f["note"], store.stage_of(f["flags"])), ("first IDB note", "decompiled"))
+        self.assertEqual(self.h.func(DECRYPT, db1)["name"], "decrypt_buf")
+        # reopening the second path resolves to the same record
+        self.assertEqual(ingest.upsert_database(self.conn, str(raw) + ".i64"), db1)
+
+    def test_merge_when_hash_arrives_later(self):
+        a = self.h.call("open_idb", {"path": "/a/t.i64"}, {"path": "/a/t.i64"})["db_id"]
+        self.h.call("idb_meta", {}, {"sha256": "ab" * 32})
+        self.h.call("list_functions", {}, LIST_FUNCS)
+        self.h.call("decompile", {"address": "0x100000514"}, MAIN_DECOMP)
+        b = self.h.call("open_idb", {"path": "/b/t.i64"}, {"path": "/b/t.i64"})["db_id"]
+        self.assertNotEqual(a, b)
+        self.h.call("list_functions", {}, LIST_FUNCS)
+        self.h.call("disasm", {"address": "0x100000514"}, "0x100000514: SUB")
+        self.h.call("idb_meta", {}, {"sha256": "ab" * 32})  # now we know it is the same binary
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM databases WHERE key IN ('/a/t.i64', '/b/t.i64')").fetchone()[0], 1)
+        f = self.h.func(MAIN, a)
+        self.assertTrue(f["flags"] & store.F_DECOMP and f["flags"] & store.F_DISASM)
+        self.assertEqual(f["touch_count"], 2)
+        c = self.h.call("decompile", {"address": "0x1000004b0"}, "int d(void)\n{}")
+        self.assertEqual(c["db_id"], a)  # the session follows the merged record
+
+
 class ParseTests(unittest.TestCase):
     def test_decompiled_name(self):
         self.assertEqual(parse.decompiled_name(MAIN_DECOMP), "main")

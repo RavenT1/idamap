@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import mimetypes
 import re
@@ -48,6 +49,10 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------------------- helpers
     def _send(self, body: bytes, ctype: str, status: int = 200, extra: dict | None = None):
+        # big payloads (the full function list of a 100k-function binary is >10 MB of JSON) compress ~5-10x
+        if len(body) > 64 * 1024 and "gzip" in (self.headers.get("Accept-Encoding") or ""):
+            body = gzip.compress(body, compresslevel=5)
+            extra = {**(extra or {}), "Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -250,7 +255,7 @@ def delete_database(c, db: int) -> None:
     """Forget everything idamap recorded for one database (the IDA database itself is untouched)."""
     c.execute("DELETE FROM call_aliases WHERE call_id IN (SELECT id FROM calls WHERE db_id=?)", (db,))
     for t in ("calls", "functions", "touches", "edges", "renames", "comments", "segments", "func_refs", "annotations",
-              "workspace_ids"):
+              "workspace_ids", "db_aliases"):
         c.execute(f"DELETE FROM {t} WHERE db_id=?", (db,))
     c.execute("UPDATE sessions SET db_id=NULL WHERE db_id=?", (db,))
     c.execute("DELETE FROM databases WHERE id=?", (db,))

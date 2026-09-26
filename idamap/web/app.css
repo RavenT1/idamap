@@ -363,3 +363,4 @@ pre.out {
 .ref-import { color: var(--st-disassembled); }
 .setting { border: 1px solid var(--line2); border-radius: 8px; padding: 12px 14px; margin: 14px 0; }
 .toggle.big { font-size: 13px; color: var(--text); }
+.sugg { font: italic 11.5px var(--mono); color: var(--st-annotated); opacity: .85; margin-left: 2px; white-space: nowrap; }

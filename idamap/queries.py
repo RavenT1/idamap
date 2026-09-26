@@ -116,7 +116,8 @@ def changed_calls(conn, since: float) -> list[tuple[float, dict]]:
 def functions(conn, db_id: int, since: float | None = None) -> dict:
     sql = ("SELECT start_i, name, size, flags, touch_count, last_touched, first_touched, human_status, "
            "orig_name, note IS NOT NULL AND note != '' AS has_note, demangled, "
-           "(SELECT summary || char(31) || status FROM annotations a WHERE a.db_id=functions.db_id "
+           "(SELECT summary || char(31) || status || char(31) || COALESCE(name_suggestion, '') FROM annotations a "
+           " WHERE a.db_id=functions.db_id "
            " AND a.func_i=functions.start_i AND a.status != 'rejected' ORDER BY a.id DESC LIMIT 1) AS ann "
            "FROM functions WHERE db_id=?")
     args: list = [db_id]
@@ -129,11 +130,11 @@ def functions(conn, db_id: int, since: float | None = None) -> dict:
     #  demangled, explanation summary, explanation status]
     out = []
     for r in rows:
-        summ, st = (r["ann"].split("\x1f", 1) + [None])[:2] if r["ann"] else (None, None)
+        summ, st, sugg = (r["ann"].split("\x1f") + [None, None])[:3] if r["ann"] else (None, None, None)
         out.append([S.hexa(S.from_i(r["start_i"])), _fname(r), r["size"], r["flags"], r["touch_count"],
                     r["last_touched"], r["first_touched"], r["human_status"],
                     r["orig_name"] if r["orig_name"] and r["orig_name"] != r["name"] else None, bool(r["has_note"]),
-                    r["demangled"], summ, st])
+                    r["demangled"], summ, st, sugg or None])
     return {"now": time.time(), "functions": out}
 
 
@@ -250,7 +251,7 @@ def graph(conn, db_id: int, mode: str = "touched", limit: int = 1500) -> dict:
     trail = []
     seen = set()
     for r in conn.execute(
-            "SELECT func_i FROM touches WHERE db_id=? AND role='target' AND func_i IS NOT NULL ORDER BY id",
+            "SELECT func_i FROM touches WHERE db_id=? AND role='target' AND kind != 'locate' AND func_i IS NOT NULL ORDER BY id",
             (db_id,)):
         if r[0] not in seen:
             seen.add(r[0])
@@ -283,7 +284,8 @@ def summary(conn, db_id: int) -> dict:
     for r in conn.execute(
             """SELECT f.start_i, f.name, f.flags, max(t.id) AS last FROM touches t
                JOIN functions f ON f.db_id=t.db_id AND f.start_i=t.func_i
-               WHERE t.db_id=? AND t.role='target' GROUP BY t.func_i ORDER BY last DESC LIMIT 15""", (db_id,)):
+               WHERE t.db_id=? AND t.role='target' AND t.kind != 'locate'
+               GROUP BY t.func_i ORDER BY last DESC LIMIT 15""", (db_id,)):
         focus.append({"start": S.hexa(S.from_i(r["start_i"])), "name": _fname(r), "flags": r["flags"]})
     renames = [dict(r) for r in conn.execute(
         "SELECT addr, old_name, new_name, ts FROM renames WHERE db_id=? ORDER BY id DESC LIMIT 30", (db_id,))]
