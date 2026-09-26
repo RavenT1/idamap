@@ -116,8 +116,9 @@ def collect_refs(deadline):
 
     def on_import(ea, name, _ord):
         if name and time.time() <= deadline:
+            label = _demangle(name) or name  # Swift / C++ imports are unreadable mangled
             for f in _funcs_referencing(ea):
-                add(f, "import", name)
+                add(f, "import", label)
         return True
 
     for i in range(ida_nalt.get_import_module_qty()):

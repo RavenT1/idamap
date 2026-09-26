@@ -152,6 +152,7 @@ async function selectDb(id) {
   $("#exReport").href = `/api/db/${id}/report.md`;
   $("#exSync").href = `/api/db/${id}/ida_sync.py`;
   renderHeader();
+  updateNowBar();
   renderTab(true);
 }
 
@@ -246,7 +247,7 @@ function renderHeader() {
   const bar = $("#miniBar");
   const counts = countStages();
   const total = Math.max(totalFuncs(), 1);
-  fill(bar, ...STAGES.slice(1).reverse().map((s) => h("i", { style: { width: `${(100 * counts[s]) / total}%`, background: stColor(s) }, title: `${s}: ${counts[s]}` })));
+  fill(bar, ...STAGES.slice(1).reverse().map((s) => h("i", { style: { width: `${(100 * counts[s]) / total}%`, minWidth: counts[s] ? "2px" : "0", background: stColor(s) }, title: `${s}: ${counts[s]}` })));
 }
 
 function totalFuncs() {
@@ -337,7 +338,7 @@ function kpi(label, value, sub, frac, color) {
   return h("div", { class: "kpi" },
     h("div", { class: "l" }, label),
     h("div", { class: "v" }, value, sub != null ? h("small", null, sub) : null),
-    frac != null ? h("div", { class: "bar" }, h("i", { style: { width: `${Math.min(100, frac * 100)}%`, background: color || css("--accent") } })) : null);
+    frac != null ? h("div", { class: "bar" }, h("i", { style: { width: `${Math.min(100, frac * 100)}%`, minWidth: frac > 0 ? "3px" : "0", background: color || css("--accent") } })) : null);
 }
 
 function renderOverview() {
@@ -347,7 +348,7 @@ function renderOverview() {
   const counts = countStages();
   const total = totalFuncs();
   const inspected = counts.explored + counts.disassembled + counts.decompiled + counts.annotated;
-  const pct = (n) => (total ? `${((100 * n) / total).toFixed(1)}%` : "");
+  const pct = (n) => (!total ? "" : n && (100 * n) / total < 0.1 ? "<0.1%" : `${((100 * n) / total).toFixed(1)}%`);
   const errors = s.by_tool.reduce((a, t) => a + (t.errors || 0), 0);
   const reviewed = (s.human.reviewed || 0);
   const root = $("#tab-overview");
@@ -374,7 +375,7 @@ function renderOverview() {
   kids.push(h("div", { class: "card" },
     h("h3", null, "Coverage"),
     h("div", { class: "stackbar" }, STAGES.slice(1).reverse().map((st) =>
-      h("i", { style: { width: `${(100 * counts[st]) / Math.max(total, 1)}%`, background: stColor(st) }, title: `${STAGE_LABEL[st]}: ${counts[st]}` }))),
+      h("i", { style: { width: `${(100 * counts[st]) / Math.max(total, 1)}%`, minWidth: counts[st] ? "4px" : "0", background: stColor(st) }, title: `${STAGE_LABEL[st]}: ${counts[st]}` }))),
     h("div", { class: "legend", style: { marginTop: "8px" } }, STAGES.slice().reverse().map((st) =>
       h("span", null, h("i", { class: "sw", style: { background: stColor(st) } }), `${STAGE_LABEL[st]} `, h("b", { class: "mono" }, counts[st].toLocaleString()))))));
 
