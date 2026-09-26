@@ -14,7 +14,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Coverage flags stored in functions.flags (bitwise OR of everything that
 # happened to the function).
@@ -107,7 +107,9 @@ CREATE TABLE IF NOT EXISTS databases (
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,               -- Claude Code session_id
+    id TEXT PRIMARY KEY,               -- Claude Code session_id / proxy session id
+    harness TEXT,                      -- client that drove ida-mcp (claude-code, cursor, codex, ...)
+    source TEXT,                       -- hook | proxy-stdio | proxy-http
     cwd TEXT,
     transcript_path TEXT,
     db_id INTEGER,                     -- database currently open in this session
@@ -119,6 +121,12 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS workspace_ids (
     ws_id TEXT PRIMARY KEY,
     db_id INTEGER
+);
+
+-- proxy call ids that duplicate a call already recorded by a Claude Code hook
+CREATE TABLE IF NOT EXISTS call_aliases (
+    alias TEXT PRIMARY KEY,
+    call_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS prompts (
@@ -133,6 +141,7 @@ CREATE TABLE IF NOT EXISTS calls (
     tool_use_id TEXT UNIQUE,
     session_id TEXT,
     prompt_id TEXT,
+    harness TEXT,
     db_id INTEGER,
     tool TEXT,
     category TEXT,
@@ -220,8 +229,33 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA foreign_keys=OFF")
     conn.executescript(SCHEMA)
-    conn.execute("INSERT OR IGNORE INTO meta(k, v) VALUES ('schema', ?)", (str(SCHEMA_VERSION),))
+    _migrate(conn)
     return conn
+
+
+# columns added after schema v1 (CREATE TABLE IF NOT EXISTS won't add them to old files)
+_ADDED_COLUMNS = {
+    "sessions": [("harness", "TEXT"), ("source", "TEXT")],
+    "calls": [("harness", "TEXT")],
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, cols in _ADDED_COLUMNS.items():
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, typ in cols:
+            if name not in have:
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+                except sqlite3.OperationalError:  # raced with another process
+                    pass
+    # sessions recorded before harness tracking existed all came from Claude Code hooks
+    # (idempotent; proxies always set source, so only legacy rows match)
+    if conn.execute("UPDATE sessions SET harness=COALESCE(harness, 'claude-code'), source='hook' "
+                    "WHERE source IS NULL").rowcount:
+        conn.execute("UPDATE calls SET harness=(SELECT harness FROM sessions s WHERE s.id=calls.session_id) "
+                     "WHERE harness IS NULL")
+    conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES ('schema', ?)", (str(SCHEMA_VERSION),))
 
 
 def now() -> float:

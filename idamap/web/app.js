@@ -277,6 +277,7 @@ function updateNowBar() {
     h("span", { class: "tool badge", style: { background: catColor(c.category) } }, c.tool),
     c.func ? fnLink(c.func, c.func_name || fnName(c.func)) : h("span", { class: "mono" }, c.target || ""),
     db && db.id !== state.db ? h("span", { class: "muted small" }, `in ${db.name}`) : null,
+    harnessTag(c.harness),
     h("span", { class: "muted mono small" }, dur(Math.round(elapsed * 1000))),
     running.length > 1 ? h("span", { class: "muted small" }, `+${running.length - 1} more`) : null,
     c.intent ? h("span", { class: "intent" }, "— " + c.intent.split("\n")[0]) : null,
@@ -306,8 +307,10 @@ function renderTab(force) {
 function renderEmpty() {
   fill($("#tab-overview"), h("div", { class: "empty" },
     h("h2", null, "No ida-mcp activity recorded yet"),
-    h("p", null, "Install the Claude Code hooks, restart Claude Code, and start reversing with ida-mcp:"),
-    h("pre", null, "idamap install          # adds hooks to ~/.claude/settings.json\nidamap serve --open     # this page"),
+    h("p", null, "Route your MCP client's ida-mcp through the idamap proxy (any harness), or use Claude Code hooks:"),
+    h("pre", null, "idamap mcp-config        # config snippets: Cursor, Codex, Claude Desktop, VS Code, Gemini, …\n" +
+      "                         #   command: idamap proxy -- ida-mcp\n" +
+      "idamap install           # Claude Code: hooks (adds prompts + LLM intent)"),
     h("p", null, "Every ida-mcp tool call will appear here live.")));
   showTab("overview");
 }
@@ -393,13 +396,26 @@ function renderOverview() {
   kids.push(h("div", { class: "cols" },
     h("div", null,
       h("div", { class: "card" }, h("h3", null, "Focus trail — most recently inspected"), focus),
-      h("div", { class: "card" }, h("h3", null, "Tasks (prompts)"), prompts)),
+      h("div", { class: "card" }, h("h3", null, "Tasks (prompts)"), prompts),
+      h("div", { class: "card" }, h("h3", null, "Sessions & clients"), sessionsList(s.session_list || []))),
     h("div", null,
       h("div", { class: "card" }, h("h3", null, "Activity (calls / minute)"), sparkline(s.activity)),
       h("div", { class: "card" }, h("h3", null, "Tool usage"), tools),
       h("div", { class: "card" }, h("h3", null, "Recent renames"), renames),
       h("div", { class: "card" }, h("h3", null, "Recent comments"), comments))));
   fill(root, ...kids);
+}
+
+function sessionsList(list) {
+  if (!list.length) return h("div", { class: "muted" }, "No sessions yet.");
+  return h("ul", { class: "list" }, list.map((x) => h("li", {
+    class: "prompt-li", onclick: () => { showTab("timeline"); renderTimeline(); setTimeout(() => $(`[data-session="${CSS.escape(x.id)}"], [data-prompt]`)?.scrollIntoView({ block: "start" }), 50); },
+  },
+    harnessTag(x.harness || "unknown"),
+    h("span", { class: "grow muted small mono" }, x.id.slice(0, 20)),
+    h("span", { class: "faint small" }, x.source === "hook" ? "hooks" : x.source || ""),
+    h("span", { class: "mono muted small" }, `${x.calls} calls${x.errors ? `, ${x.errors} err` : ""}`),
+    h("span", { class: "faint small" }, ago(x.last)))));
 }
 
 function refreshRelTimes() { $$(".rel").forEach((e) => { if (e.dataset.ts) e.textContent = ago(+e.dataset.ts); }); }
@@ -794,17 +810,18 @@ function renderTimeline() {
   const calls = [...state.calls.values()].filter(callVisible).sort((a, b) => (tl.oldestFirst ? a.id - b.id : b.id - a.id));
   const root = $("#timeline");
   const out = [];
-  let prompt = undefined, intent = undefined;
+  let group = undefined, intent = undefined, prev = null;
   for (const c of calls) {
-    if (c.prompt_id !== prompt) {
-      prompt = c.prompt_id; intent = undefined;
-      const p = state.prompts[prompt];
-      out.push(h("div", { class: "tl-prompt", "data-prompt": prompt || "" },
-        h("div", { class: "who" }, "you"),
-        h("div", { class: "body" },
-          h("div", { class: "faint small" }, p ? dateTime(p.ts) : dateTime(c.started_at), p?.session_id ? ` · session ${p.session_id.slice(0, 8)}` : ""),
-          h("div", { class: "txt", onclick: (e) => e.currentTarget.classList.toggle("open") },
-            p?.text || h("i", { class: "muted" }, "(prompt text unavailable — transcript not readable)")))));
+    // Group by user prompt (Claude Code hooks). Harnesses seen only through the
+    // proxy have no prompts: group their calls into work bursts per session.
+    let key;
+    if (c.prompt_id) key = "p:" + c.prompt_id;
+    else if (prev && !prev.prompt_id && prev.session_id === c.session_id && Math.abs(c.started_at - prev.started_at) < BURST_GAP) key = group;
+    else key = `s:${c.session_id}:${c.id}`;
+    prev = c;
+    if (key !== group) {
+      group = key; intent = undefined;
+      out.push(c.prompt_id ? promptHeader(c) : sessionHeader(c));
     }
     if (c.intent && c.intent !== intent) { intent = c.intent; out.push(h("div", { class: "tl-intent" }, c.intent)); }
     out.push(callEl(c));
@@ -812,6 +829,30 @@ function renderTimeline() {
   if (!out.length) out.push(h("div", { class: "empty" }, state.calls.size ? "No calls match the filters." : "No calls yet."));
   fill(root, ...out);
   $("#tlMore").hidden = tl.exhausted;
+}
+
+const BURST_GAP = 300;  // seconds of silence that start a new work block
+
+function harnessTag(name) {
+  return name ? h("span", { class: "hn", title: "MCP client" }, name) : null;
+}
+
+function promptHeader(c) {
+  const p = state.prompts[c.prompt_id];
+  return h("div", { class: "tl-prompt", "data-prompt": c.prompt_id },
+    h("div", { class: "who" }, "you"),
+    h("div", { class: "body" },
+      h("div", { class: "faint small" }, p ? dateTime(p.ts) : dateTime(c.started_at), p?.session_id ? ` · session ${p.session_id.slice(0, 8)}` : "", " ", harnessTag(c.harness)),
+      h("div", { class: "txt", onclick: (e) => e.currentTarget.classList.toggle("open") },
+        p?.text || h("i", { class: "muted" }, "(prompt text unavailable — transcript not readable)"))));
+}
+
+function sessionHeader(c) {
+  return h("div", { class: "tl-prompt", "data-session": c.session_id },
+    h("div", { class: "who", title: c.harness || "" }, (c.harness || "mcp").slice(0, 2)),
+    h("div", { class: "body" },
+      h("div", { class: "faint small" }, dateTime(c.started_at), ` · session ${c.session_id.replace(/^(stdio|http)-/, "").slice(0, 8)}`, " ", harnessTag(c.harness)),
+      h("div", { class: "muted" }, `Work block via ${c.harness || "an MCP client"} — prompts are not visible through the MCP protocol, so calls are grouped by session and time.`)));
 }
 
 function callEl(c) {

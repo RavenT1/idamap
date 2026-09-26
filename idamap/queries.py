@@ -47,7 +47,7 @@ def databases(conn) -> list[dict]:
 def call_row(r, names: dict | None = None) -> dict:
     d = {
         "id": r["id"], "tool": r["tool"], "category": r["category"], "status": r["status"],
-        "db_id": r["db_id"], "session_id": r["session_id"], "prompt_id": r["prompt_id"],
+        "db_id": r["db_id"], "session_id": r["session_id"], "prompt_id": r["prompt_id"], "harness": r["harness"],
         "target": r["target"], "intent": r["intent"], "error": r["error"],
         "started_at": r["started_at"], "ended_at": r["ended_at"], "duration_ms": r["duration_ms"],
         "output_size": r["output_size"],
@@ -284,7 +284,12 @@ def summary(conn, db_id: int) -> dict:
     segments = [{"name": r["name"], "start": r["start"], "end": r["end"], "perms": r["perms"], "type": r["type"]}
                 for r in conn.execute("SELECT * FROM segments WHERE db_id=? ORDER BY start_i", (db_id,))]
     sessions = conn.execute("SELECT count(DISTINCT session_id) FROM calls WHERE db_id=?", (db_id,)).fetchone()[0]
+    session_list = [dict(r) for r in conn.execute(
+        """SELECT s.id, s.harness, s.source, min(c.started_at) AS ts, max(c.started_at) AS last,
+                  count(*) AS calls, sum(c.status='error') AS errors, count(DISTINCT c.prompt_id) AS prompts
+           FROM calls c JOIN sessions s ON s.id=c.session_id WHERE c.db_id=?
+           GROUP BY s.id ORDER BY last DESC LIMIT 30""", (db_id,))]
     return {"db": d, "stages": stages, "human": human, "by_tool": by_tool, "activity": activity,
             "focus": focus, "renames": renames, "comments": comments, "prompts": prompts,
-            "segments": segments, "sessions": sessions,
+            "segments": segments, "sessions": sessions, "session_list": session_list,
             "edges": conn.execute("SELECT count(*) FROM edges WHERE db_id=?", (db_id,)).fetchone()[0]}

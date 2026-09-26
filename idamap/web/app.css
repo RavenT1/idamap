@@ -251,6 +251,10 @@ main { flex: 1; overflow: auto; position: relative; }
   color: #fff;
 }
 .badge.hollow { background: none !important; border: 1px solid var(--line2); color: var(--muted); }
+.hn {
+  font: 600 10px var(--mono); padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line2);
+  color: var(--muted); background: var(--panel2); white-space: nowrap;
+}
 .was { color: var(--faint); font-size: 11px; margin-left: 6px; }
 
 /* ---------- timeline ---------- */

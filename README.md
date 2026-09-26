@@ -3,17 +3,26 @@
 **LLM + [ida-mcp](https://github.com/blacktop/ida-mcp-rs) ile yapılan reverse engineering'in kaydını tutan ve görselleştiren yerel web aracı.**
 
 LLM, ida-mcp üzerinden saniyede birkaç tool çağrısı yapar; terminale akan yazıları takip etmek imkânsızdır.
-idamap her `mcp__ida__*` çağrısını **Claude Code hook'ları** ile sessizce yakalar, bir SQLite corpus'una işler ve
-tarayıcıda canlı olarak gösterir:
+idamap her ida-mcp çağrısını yakalar, bir SQLite corpus'una işler ve tarayıcıda canlı olarak gösterir:
 
-- **Şu an ne yapılıyor** — üst çubukta çalışan çağrı, hedef fonksiyon ve süre.
+- **Şu an ne yapılıyor** — üst çubukta çalışan çağrı, hedef fonksiyon, süre ve hangi istemci (harness).
 - **Nereler reverse'lendi** — tüm binary'nin kapsama haritası (IDA navigation band benzeri adres şeridi + her fonksiyon bir hücre).
-- **Neden** — LLM'in her çağrıdan önce yazdığı açıklama cümlesi ve ait olduğu kullanıcı prompt'u, çağrıya bağlanır.
-- **Nasıl ilerledi** — çağrı grafiğinde incelenen fonksiyonlar, keşfedilmemiş komşular ve keşif sırası (trail).
+- **Neden** — (Claude Code'da) LLM'in her çağrıdan önce yazdığı açıklama ve ait olduğu kullanıcı prompt'u.
+- **Nasıl ilerledi** — çağrı grafiğinde incelenen fonksiyonlar, keşfedilmemiş komşular ve keşif sırası.
 - **İnsan katmanı** — her fonksiyona kendi inceleme durumun (to do / reviewed / suspicious …) ve notların.
 - **Kalıcı kayıt** — Markdown araştırma günlüğü ve kapsamı IDA GUI'ye geri boyayan IDAPython script'i.
 
-ida-mcp'ye hiçbir değişiklik gerekmez; hook'lar yalnızca gözlemci olarak çalışır ve hata alsalar bile çağrıyı asla bozmaz.
+ida-mcp'ye hiçbir değişiklik gerekmez. Yakalama iki yoldan yapılır; ikisi aynı veritabanına yazar:
+
+| Yol | Hangi istemciler | Ne kaydeder |
+|---|---|---|
+| **MCP proxy** (`idamap proxy`) | **Her MCP istemcisi**: Cursor, Codex, Claude Desktop, Claude Code, Gemini CLI, VS Code/Copilot, Windsurf, Zed, Cline, … (stdio veya Streamable HTTP) | Tüm tool çağrıları, sonuçlar, hatalar, süreler, istemci adı |
+| **Claude Code hook'ları** (`idamap install`) | Claude Code | Yukarıdakiler **+** kullanıcı prompt'u ve LLM'in her çağrıdan önceki açıklaması (transcript'ten) |
+
+MCP protokolü prompt'u veya modelin düşüncesini sunucuya taşımaz; bu yüzden proxy üzerinden gelen oturumlar
+zaman çizelgesinde prompt yerine oturum + boşluk süresine göre "çalışma blokları" halinde gruplanır.
+Claude Code'da hook **ve** proxy birlikte kullanılırsa çağrılar iki kez kaydedilmez: Claude Code isteğin
+`_meta`'sında kendi `toolUseId`'sini gönderir, proxy bununla hook kaydını birebir bulup kendi kaydını atlar.
 
 ## Kurulum
 
@@ -22,16 +31,59 @@ Python ≥ 3.10, harici bağımlılık yok (UI kütüphanesi `cytoscape.js` repo
 ```sh
 cd ida_mcp_map
 uv tool install -e .          # veya: pipx install -e .   /   pip install -e .
+idamap serve --open           # http://127.0.0.1:8777
+```
+
+### Herhangi bir MCP istemcisi (proxy)
+
+İstemcinin ida-mcp'yi başlattığı komutu `idamap proxy -- ida-mcp` ile değiştir. Mutlak yollarla hazır
+config parçaları için:
+
+```sh
+idamap mcp-config                   # tüm istemciler
+idamap mcp-config --client cursor   # claude-code | cursor | claude-desktop | windsurf | gemini | vscode | codex | http
+```
+
+Örnek (Cursor `~/.cursor/mcp.json`, Claude Desktop, Windsurf, Gemini CLI aynı biçimi kullanır):
+
+```json
+{ "mcpServers": { "ida": { "command": "/Users/you/.local/bin/idamap",
+                           "args": ["proxy", "--", "/opt/homebrew/bin/ida-mcp"] } } }
+```
+
+Codex (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.ida]
+command = "/Users/you/.local/bin/idamap"
+args = ["proxy", "--", "/opt/homebrew/bin/ida-mcp"]
+```
+
+ida-mcp argümanların (`--workspace`, `--read-only` …) ida-mcp yolundan sonra aynen gelir. GUI uygulamaları
+shell `PATH`'ini görmediği için mutlak yol kullan (`mcp-config` bunu senin için yazar).
+
+**HTTP** üzerinden bağlanan istemciler için `ida-mcp serve-http`'in önüne koy:
+
+```sh
+ida-mcp serve-http --bind 127.0.0.1:8765
+idamap proxy --listen 127.0.0.1:8766 --upstream http://127.0.0.1:8765/
+# istemciyi http://127.0.0.1:8766/ adresine yönlendir
+```
+
+Proxy baytları önce iletir, gözlemi yan kanalda yapar ve kaydı ayrı bir iş parçacığında yazar: ayrıştırma
+veya veritabanı hatası MCP trafiğini asla geciktirmez ya da bozmaz (hatalar `~/.idamap/proxy_errors.log`).
+Hem MCP ≤2025 (`initialize` handshake) hem handshake'siz MCP 2026-07-28 (`_meta` içinde clientInfo) desteklenir.
+
+### Claude Code (daha zengin kayıt için hook'lar)
+
+```sh
 idamap install                # hook'ları ~/.claude/settings.json'a ekler (tüm projeler)
 # yalnızca bir proje için:  idamap install --scope project --project-dir /path/to/research
-idamap serve --open           # http://127.0.0.1:8765
 ```
 
 Hook'ları ekledikten sonra Claude Code'u yeniden başlat (veya `/hooks` ekranını aç). Kaldırmak için `idamap uninstall`.
-Kurulum durumu ve kayıtlı veritabanları: `idamap status`.
-
-ida-mcp sunucun `ida` dışında bir isimle kayıtlıysa (örn. `mcp__ida-pro__…`), matcher varsayılan olarak `mcp__ida.*`
-olduğu için genelde yine yakalanır; farklıysa `idamap install --matcher 'mcp__benimsunucum__.*'`.
+Kurulum durumu ve kayıtlı veritabanları: `idamap status`. ida-mcp sunucun farklı bir isimle kayıtlıysa
+`idamap install --matcher 'mcp__benimsunucum__.*'`.
 
 ## Tam haritayı almak (önerilir)
 
@@ -79,21 +131,22 @@ Bir fonksiyonun aşaması ulaştığı en ileri seviyedir:
 ## Nasıl çalışır
 
 ```
-Claude Code ──PreToolUse──▶ idamap.hook ──▶ ~/.idamap/idamap.db (SQLite, WAL)
-     │        PostToolUse                         ▲
-     ▼        PostToolUseFailure                  │ poll
-  ida-mcp                               idamap serve ──SSE──▶ tarayıcı
+Herhangi bir MCP istemcisi ──▶ idamap proxy ──▶ ida-mcp
+                                   │ (kuyruk, ayrı thread)
+Claude Code ──hook'lar──▶ idamap.hook ──┴──▶ ~/.idamap/idamap.db (SQLite, WAL)
+                                                   ▲ poll
+                                     idamap serve ──SSE──▶ tarayıcı
 ```
 
-- **Pre**: çağrı `running` olarak kaydedilir, hedef adres/fonksiyon çözülür (canlı "şu an" çubuğu).
-- **Post**: çıktı ayrıştırılır — fonksiyon kayıtları, call edge'leri, xref'ler, string referansları, rename'ler, yorumlar,
+- **Başlangıç** (hook'ta PreToolUse, proxy'de `tools/call` isteği): çağrı `running` olarak kaydedilir, hedef adres/fonksiyon çözülür (canlı "şu an" çubuğu).
+- **Bitiş** (PostToolUse / yanıt): çıktı ayrıştırılır — fonksiyon kayıtları, call edge'leri, xref'ler, string referansları, rename'ler, yorumlar,
   segmentler, DB metadata'sı. ida-mcp'nin tekli (düz payload) ve toplu (`{"results": [...]}`) yanıt biçimleri desteklenir.
   Adres ile gelen ama henüz bilinmeyen hedefler "stub" fonksiyon olarak tutulur ve harita geldiğinde gerçek fonksiyonla birleştirilir.
-- **Niyet**: tool_use transcript'e yazıldıktan sonra, aynı turdaki son asistan metni çağrıya bağlanır.
+- **Niyet** (yalnızca Claude Code hook'ları): tool_use transcript'e yazıldıktan sonra, aynı turdaki son asistan metni çağrıya bağlanır.
 - **Çoklu IDB**: oturum başına aktif veritabanı izlenir; ida-mcp `--workspace` modundaki `database_id` de eşlenir.
 - Adresler 64-bit güvenli saklanır (iOS kernelcache gibi `0xfffffff0…` adresler dahil); API'de hep hex string'dir.
 
-Veri dizini `IDAMAP_HOME` ile değiştirilebilir (varsayılan `~/.idamap`). Hook hataları `~/.idamap/hook_errors.log`'a yazılır.
+Veri dizini `IDAMAP_HOME` ile değiştirilebilir (varsayılan `~/.idamap`). Hatalar `~/.idamap/hook_errors.log` ve `proxy_errors.log`'a yazılır.
 
 ## Geliştirme
 
@@ -101,7 +154,7 @@ Veri dizini `IDAMAP_HOME` ile değiştirilebilir (varsayılan `~/.idamap`). Hook
 python3 -m unittest discover -s tests -t .
 ```
 
-Testler ida-mcp'nin gerçek çıktılarından ve gerçek Claude Code hook payload'larından üretilmiş fixture'larla çalışır.
+Testler ida-mcp'nin gerçek çıktılarından, gerçek Claude Code hook payload'larından ve sahte stdio/HTTP(SSE) MCP sunucularıyla proxy şeffaflığı üzerinden çalışır.
 
 ## Lisans
 

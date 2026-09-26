@@ -155,6 +155,70 @@ def cmd_export_script(a) -> int:
     return 0
 
 
+def cmd_proxy(a) -> int:
+    from . import proxy
+
+    if a.listen or a.upstream:
+        if not (a.listen and a.upstream):
+            sys.stderr.write("idamap proxy: --listen and --upstream go together\n")
+            return 2
+        return proxy.run_http(a.listen, a.upstream, a.harness)
+    cmd = list(a.command)
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    return proxy.run_stdio(cmd, a.harness)
+
+
+def _proxy_argv() -> list[str]:
+    """Absolute command for MCP client configs (GUI apps don't inherit your shell PATH)."""
+    exe = shutil.which("idamap")
+    ida = shutil.which("ida-mcp") or "ida-mcp"
+    head = [exe] if exe else [sys.executable, "-m", "idamap"]
+    return head + ["proxy", "--", ida]
+
+
+def cmd_mcp_config(a) -> int:
+    argv = _proxy_argv()
+    cmd, args = argv[0], argv[1:]
+    env = {} if shutil.which("idamap") or _importable() else {"PYTHONPATH": str(Path(__file__).resolve().parent.parent)}
+    std = {"command": cmd, "args": args, **({"env": env} if env else {})}
+    blocks = {
+        "claude-code": ("claude mcp add (shell)",
+                        "claude mcp add ida -- " + " ".join(_q(x) for x in argv)
+                        + "".join(f" -e {k}={_q(v)}" for k, v in env.items())),
+        "cursor": ("~/.cursor/mcp.json  (or .cursor/mcp.json in a project)",
+                   json.dumps({"mcpServers": {"ida": std}}, indent=2)),
+        "claude-desktop": ("~/Library/Application Support/Claude/claude_desktop_config.json",
+                           json.dumps({"mcpServers": {"ida": std}}, indent=2)),
+        "windsurf": ("~/.codeium/windsurf/mcp_config.json", json.dumps({"mcpServers": {"ida": std}}, indent=2)),
+        "gemini": ("~/.gemini/settings.json", json.dumps({"mcpServers": {"ida": std}}, indent=2)),
+        "vscode": (".vscode/mcp.json", json.dumps({"servers": {"ida": {"type": "stdio", **std}}}, indent=2)),
+        "codex": ("~/.codex/config.toml",
+                  "[mcp_servers.ida]\n" + f"command = {json.dumps(cmd)}\n" + f"args = {json.dumps(args)}\n"
+                  + (f"env = {{ {', '.join(f'{k} = {json.dumps(v)}' for k, v in env.items())} }}\n" if env else "")),
+        "http": ("any client that speaks Streamable HTTP",
+                 "ida-mcp serve-http --bind 127.0.0.1:8765 &\n"
+                 "idamap proxy --listen 127.0.0.1:8766 --upstream http://127.0.0.1:8765/\n"
+                 "# point the client at http://127.0.0.1:8766/"),
+    }
+    names = list(blocks) if a.client == "all" else [a.client]
+    for n in names:
+        where, text = blocks[n]
+        print(f"# {n} — {where}\n{text}\n")
+    print("# Existing ida-mcp arguments (e.g. --workspace, --read-only) go after the ida-mcp path.")
+    return 0
+
+
+def _importable() -> bool:
+    return subprocess.run([sys.executable, "-c", "import idamap"], cwd="/", capture_output=True).returncode == 0
+
+
+def _q(s: str) -> str:
+    import shlex
+
+    return shlex.quote(s)
+
+
 def cmd_hook(a) -> int:
     from .hook import main
 
@@ -168,7 +232,7 @@ def main(argv=None) -> int:
 
     s = sub.add_parser("serve", help="start the web UI")
     s.add_argument("--host", default="127.0.0.1")
-    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--port", type=int, default=8777)
     s.add_argument("--open", action="store_true", help="open the browser")
     s.set_defaults(fn=cmd_serve)
 
@@ -204,6 +268,21 @@ def main(argv=None) -> int:
 
     s = sub.add_parser("export-script", help="print path of the IDAPython full-map exporter")
     s.set_defaults(fn=cmd_export_script)
+
+    s = sub.add_parser("proxy", help="transparent MCP proxy in front of ida-mcp (works with any MCP client)",
+                       description="stdio:  idamap proxy -- ida-mcp [ida-mcp args]\n"
+                                   "http:   idamap proxy --listen 127.0.0.1:8766 --upstream http://127.0.0.1:8765/",
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    s.add_argument("--listen", help="HTTP mode: address to listen on (host:port)")
+    s.add_argument("--upstream", help="HTTP mode: URL of `ida-mcp serve-http`")
+    s.add_argument("--harness", help="label for the client (default: from MCP clientInfo)")
+    s.add_argument("command", nargs=argparse.REMAINDER, help="stdio mode: server command (default: ida-mcp)")
+    s.set_defaults(fn=cmd_proxy)
+
+    s = sub.add_parser("mcp-config", help="print MCP client config snippets that route ida-mcp through idamap")
+    s.add_argument("--client", default="all",
+                   choices=["all", "claude-code", "cursor", "claude-desktop", "windsurf", "gemini", "vscode", "codex", "http"])
+    s.set_defaults(fn=cmd_mcp_config)
 
     s = sub.add_parser("hook", help="hook entry point (reads a Claude Code hook event on stdin)")
     s.set_defaults(fn=cmd_hook)

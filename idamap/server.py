@@ -195,7 +195,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
-def serve(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False) -> None:
+def serve(host: str = "127.0.0.1", port: int = 8777, open_browser: bool = False) -> None:
     S.connect().close()  # create schema
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True

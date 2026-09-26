@@ -64,13 +64,27 @@ def markdown(conn, db_id: int) -> str:
     lines += ["## Session timeline", ""]
     rows = conn.execute("SELECT * FROM calls WHERE db_id=? ORDER BY id", (db_id,)).fetchall()
     prompts = {p["id"]: p["text"] for p in conn.execute("SELECT id, text FROM prompts")}
-    cur_prompt = object()
+    cur = object()
     last_intent = None
+    prev = None
     for r in rows:
-        if r["prompt_id"] != cur_prompt:
-            cur_prompt = r["prompt_id"]
-            txt = (prompts.get(cur_prompt) or "(prompt unavailable)").strip()
-            lines += ["", f"### {_t(r['started_at'])} — task", "", "> " + txt[:600].replace("\n", "\n> "), ""]
+        # prompts come from Claude Code hooks; proxy-only harnesses are grouped by session + idle gap
+        if r["prompt_id"]:
+            key = r["prompt_id"]
+        elif prev is not None and not prev["prompt_id"] and prev["session_id"] == r["session_id"] \
+                and r["started_at"] - prev["started_at"] < 300:
+            key = cur
+        else:
+            key = ("s", r["id"])
+        prev = r
+        if key != cur:
+            cur = key
+            via = f" via {r['harness']}" if r["harness"] else ""
+            if r["prompt_id"]:
+                txt = (prompts.get(r["prompt_id"]) or "(prompt unavailable)").strip()
+                lines += ["", f"### {_t(r['started_at'])} — task{via}", "", "> " + txt[:600].replace("\n", "\n> "), ""]
+            else:
+                lines += ["", f"### {_t(r['started_at'])} — work block{via}", ""]
         if r["intent"] and r["intent"] != last_intent:
             last_intent = r["intent"]
             lines += ["", f"*{r['intent'].strip()[:400]}*", ""]

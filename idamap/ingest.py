@@ -60,14 +60,18 @@ def _touch_session(conn, payload: dict) -> dict:
     sid = payload.get("session_id") or "unknown"
     ts = S.now()
     row = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+    harness = payload.get("harness") or ("claude-code" if payload.get("hook_event_name") else None)
+    source = payload.get("source") or ("hook" if payload.get("hook_event_name") else None)
     if not row:
         conn.execute(
-            "INSERT INTO sessions(id, cwd, transcript_path, started_at, last_seen) VALUES (?,?,?,?,?)",
-            (sid, payload.get("cwd"), payload.get("transcript_path"), ts, ts))
+            "INSERT INTO sessions(id, harness, source, cwd, transcript_path, started_at, last_seen) VALUES (?,?,?,?,?,?,?)",
+            (sid, harness, source, payload.get("cwd"), payload.get("transcript_path"), ts, ts))
         row = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
     else:
-        conn.execute("UPDATE sessions SET last_seen=?, transcript_path=COALESCE(?, transcript_path) WHERE id=?",
-                     (ts, payload.get("transcript_path"), sid))
+        conn.execute("UPDATE sessions SET last_seen=?, transcript_path=COALESCE(?, transcript_path), "
+                     "harness=COALESCE(?, harness), source=COALESCE(?, source) WHERE id=?",
+                     (ts, payload.get("transcript_path"), harness, source, sid))
+        row = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
     return dict(row)
 
 
@@ -293,8 +297,42 @@ def _ensure_prompt(conn, payload: dict) -> None:
                  (pid, payload.get("session_id"), S.now(), text))
 
 
-def on_pre(conn, payload: dict) -> int:
+DEDUP_WINDOW = 10.0
+
+
+def _hook_duplicate(conn, tool: str, inp: dict, ts: float) -> int | None:
+    """A hook-recorded call for the same tool+arguments, not yet claimed by a proxy.
+
+    Claude Code runs PreToolUse synchronously before it sends the request, so
+    when hooks and a proxy observe the same Claude Code session the hook row
+    always exists by the time the proxy sees the request."""
+    rows = conn.execute(
+        """SELECT c.id, c.input FROM calls c JOIN sessions s ON s.id=c.session_id
+           WHERE c.tool=? AND c.started_at>? AND s.source='hook'
+             AND c.id NOT IN (SELECT call_id FROM call_aliases) ORDER BY c.id DESC LIMIT 20""",
+        (tool, ts - DEDUP_WINDOW)).fetchall()
+    for r in rows:
+        try:
+            if json.loads(r["input"] or "{}") == inp:
+                return r["id"]
+        except ValueError:
+            continue
+    return None
+
+
+def on_pre(conn, payload: dict) -> int | None:
     ts = S.now()
+    if str(payload.get("source", "")).startswith("proxy"):
+        dup = None
+        if payload.get("host_tool_use_id"):  # exact: Claude Code sends its tool_use id in _meta
+            r = conn.execute("SELECT id FROM calls WHERE tool_use_id=?", (payload["host_tool_use_id"],)).fetchone()
+            dup = r["id"] if r else None
+        if dup is None:
+            dup = _hook_duplicate(conn, P.short_tool(payload["tool_name"]), payload.get("tool_input") or {}, ts)
+        if dup is not None:
+            conn.execute("INSERT OR IGNORE INTO call_aliases(alias, call_id) VALUES (?,?)",
+                         (payload.get("tool_use_id"), dup))
+            return None
     session = _touch_session(conn, payload)
     tool = P.short_tool(payload["tool_name"])
     inp = payload.get("tool_input") or {}
@@ -306,11 +344,11 @@ def on_pre(conn, payload: dict) -> int:
     targets = P.input_targets(tool, inp) if db_id is not None else []
     tf = next((fi for fi in (_resolve_target(conn, db_id, t) for t in targets) if fi is not None), None)
     cur = conn.execute(
-        """INSERT INTO calls(tool_use_id, session_id, prompt_id, db_id, tool, category, input, status,
+        """INSERT INTO calls(tool_use_id, session_id, prompt_id, harness, db_id, tool, category, input, status,
                              started_at, intent, target, target_func_i, updated_at)
-           VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?)
+           VALUES (?,?,?,?,?,?,?,?,'running',?,?,?,?,?)
            ON CONFLICT(tool_use_id) DO NOTHING""",
-        (payload.get("tool_use_id"), session["id"], payload.get("prompt_id"), db_id, tool,
+        (payload.get("tool_use_id"), session["id"], payload.get("prompt_id"), session.get("harness"), db_id, tool,
          P.category(tool), json.dumps(inp), ts, intent, P.describe_target(tool, inp), tf, ts))
     return cur.lastrowid
 
@@ -320,10 +358,14 @@ def on_post(conn, payload: dict, ok: bool) -> None:
     tool = P.short_tool(payload["tool_name"])
     inp = payload.get("tool_input") or {}
     tuid = payload.get("tool_use_id")
+    if tuid and conn.execute("SELECT 1 FROM call_aliases WHERE alias=?", (tuid,)).fetchone():
+        return  # the hook records this call
     row = conn.execute("SELECT * FROM calls WHERE tool_use_id=?", (tuid,)).fetchone() if tuid else None
     if row is None:  # PreToolUse missed (e.g. hooks installed mid-call)
         on_pre(conn, payload)
         row = conn.execute("SELECT * FROM calls WHERE tool_use_id=?", (tuid,)).fetchone()
+        if row is None:
+            return
     session = _touch_session(conn, payload)
     call_id, db_id = row["id"], row["db_id"]
     if db_id is None and not (ok and tool in ("open_idb", "open_dsc")):
