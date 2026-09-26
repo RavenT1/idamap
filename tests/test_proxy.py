@@ -9,6 +9,7 @@ import textwrap
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,7 +44,10 @@ FAKE_SERVER = textwrap.dedent(f"""
         if "id" not in m:
             continue
         if m["method"] == "initialize":
-            res = {{"protocolVersion": "2025-06-18", "capabilities": {{"tools": {{}}}}, "serverInfo": {{"name": "fake"}}}}
+            res = {{"protocolVersion": "2025-06-18", "capabilities": {{"tools": {{}}}}, "serverInfo": {{"name": "fake"}},
+                   "instructions": "fake ida"}}
+        elif m["method"] == "tools/list":
+            res = {{"tools": [{{"name": "decompile", "inputSchema": {{"type": "object"}}}}]}}
         elif m["method"] == "tools/call":
             text, err = reply(m["params"]["name"], m["params"].get("arguments") or {{}})
             res = {{"content": [{{"type": "text", "text": text}}], "isError": err}}
@@ -122,6 +126,111 @@ class StdioProxyTests(ProxyBase):
                            input=data, capture_output=True, env=self.env, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.check_recorded("claude-code", "proxy-stdio")
+
+
+class AnnotateToolTests(ProxyBase):
+    def run_proxy(self, msgs, *flags):
+        """Behave like a real client: send one request, wait for its response, then the next."""
+        srv = Path(self.tmp.name) / "fake_server.py"
+        srv.write_text(FAKE_SERVER)
+        p = subprocess.Popen([sys.executable, "-m", "idamap", "proxy", *flags, "--", sys.executable, str(srv)],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env)
+        out = {}
+        for m in msgs:
+            p.stdin.write(json.dumps(m).encode() + b"\n")
+            p.stdin.flush()
+            if "id" in m:
+                reply = json.loads(p.stdout.readline())
+                out[reply["id"]] = reply
+        p.stdin.close()
+        p.wait(timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr.read())
+        p.stdout.close()
+        p.stderr.close()
+        return out
+
+    def test_tools_offered_answered_and_recorded(self):
+        init = messages()[:2]
+        msgs = init + [
+            {"jsonrpc": "2.0", "id": 10, "method": "tools/list", "params": {}},
+            {"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "open_idb", "arguments": {"path": "/x/t"}}},
+            {"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "list_functions", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": {"name": "idamap_annotate", "arguments": {
+                "address": "0x100000520", "summary": "Program entry: checks argv then decrypts the banner.",
+                "name_suggestion": "main_entry", "tags": ["entry"], "confidence": "high",
+                "evidence": "calls _decrypt and puts"}}},
+            {"jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": {"name": "idamap_annotate", "arguments": {"address": "main"}}},
+        ]
+        out = self.run_proxy(msgs, "--annotate-tools")
+        names = [t["name"] for t in out[10]["result"]["tools"]]
+        self.assertEqual(names, ["decompile", "idamap_annotate", "idamap_lookup"])
+        self.assertIn("idamap_lookup", out[0]["result"]["instructions"])
+        self.assertIn("Recorded explanation for _main (0x100000514)", out[13]["result"]["content"][0]["text"])
+        self.assertTrue(out[14]["result"]["isError"])
+
+        conn = self.db()
+        a = conn.execute("SELECT * FROM annotations").fetchone()
+        self.assertEqual((a["func_i"], a["status"], a["name_suggestion"], a["harness"]),
+                         (store.to_i(0x100000514), "hypothesis", "main_entry", "cursor"))
+        self.assertIsNotNone(a["call_id"])
+        f = conn.execute("SELECT flags FROM functions WHERE start='0x100000514'").fetchone()
+        self.assertEqual(store.stage_of(f["flags"]), "annotated")
+        tools = [r[0] for r in conn.execute("SELECT tool FROM calls ORDER BY id")]
+        self.assertEqual(tools, ["open_idb", "list_functions", "idamap_annotate", "idamap_annotate"])
+
+        # a later session (another client) reads it back
+        out = self.run_proxy(messages("Codex")[:2] + [
+            {"jsonrpc": "2.0", "id": 20, "method": "tools/call", "params": {"name": "open_idb", "arguments": {"path": "/x/t"}}},
+            {"jsonrpc": "2.0", "id": 21, "method": "tools/call", "params": {"name": "idamap_lookup",
+                                                                          "arguments": {"address": "0x100000514"}}}],
+            "--annotate-tools")
+        known = json.loads(out[21]["result"]["content"][0]["text"])
+        self.assertEqual(known["explanations"][0]["summary"], "Program entry: checks argv then decrypts the banner.")
+        self.assertEqual(known["explanations"][0]["by"], "cursor")
+
+    def test_mcp_2026_result_shape(self):
+        msgs = messages_2026()[:2] + [{"jsonrpc": "2.0", "id": 30, "method": "tools/call", "params": {
+            "name": "idamap_lookup", "arguments": {"address": "0x100000514"},
+            "_meta": messages_2026()[0]["params"]["_meta"]}}]
+        out = self.run_proxy(msgs, "--annotate-tools")
+        self.assertEqual(out[30]["result"]["resultType"], "complete")
+        # older protocol: no resultType
+        out = self.run_proxy(messages()[:2] + [{"jsonrpc": "2.0", "id": 31, "method": "tools/call", "params": {
+            "name": "idamap_lookup", "arguments": {"address": "0x10"}}}], "--annotate-tools")
+        self.assertNotIn("resultType", out[31]["result"])
+
+    def test_off_by_default_is_transparent(self):
+        msgs = messages()[:2] + [{"jsonrpc": "2.0", "id": 10, "method": "tools/list", "params": {}}]
+        out = self.run_proxy(msgs)
+        self.assertEqual([t["name"] for t in out[10]["result"]["tools"]], ["decompile"])
+        self.assertEqual(out[0]["result"]["instructions"], "fake ida")
+
+
+class ServerGuardTests(ProxyBase):
+    def test_host_and_origin_checks(self):
+        from idamap import server
+
+        httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{httpd.server_port}"
+
+        def req(path, method="GET", headers=None, body=None):
+            r = urllib.request.Request(base + path, body, headers or {}, method=method)
+            try:
+                with urllib.request.urlopen(r) as resp:
+                    return resp.status
+            except urllib.error.HTTPError as e:
+                return e.code
+
+        self.assertEqual(req("/api/dbs"), 200)
+        self.assertEqual(req("/api/dbs", headers={"Host": "evil.example:80"}), 403)  # DNS rebinding
+        body = json.dumps({"key": "annotate_tools", "value": True}).encode()
+        self.assertEqual(req("/api/config", "POST", {"Content-Type": "text/plain"}, body), 415)
+        self.assertEqual(req("/api/config", "POST", {"Content-Type": "application/json",
+                                                     "Origin": "https://evil.example"}, body), 403)
+        self.assertEqual(req("/api/config", "POST", {"Content-Type": "application/json"}, body), 200)
+        httpd.shutdown()
+        httpd.server_close()
 
 
 class HttpProxyTests(ProxyBase):

@@ -42,6 +42,7 @@ CATEGORIES: dict[str, list[str]] = {
     "edit": ["set_comments", "rename", "patch", "patch_asm", "lumina_apply",
              "lumina_lookup", "list_patches"],
     "script": ["run_script"],
+    "idamap": ["idamap_annotate", "idamap_lookup"],
 }
 TOOL_CATEGORY = {t: c for c, ts in CATEGORIES.items() for t in ts}
 
@@ -83,6 +84,8 @@ TARGET_KIND: dict[str, tuple[str, int]] = {
     "addr_info": ("locate", 0),
     "lookup_funcs": ("locate", 0),
     "resolve_function": ("locate", 0),
+    "idamap_annotate": ("explain", S.F_EXPLAINED),
+    "idamap_lookup": ("locate", 0),
 }
 
 # Tools whose target is certainly the start of a function (so an unknown
@@ -315,6 +318,8 @@ def describe_target(tool: str, inp: dict) -> str:
         extra = str(inp.get("query") or inp.get("category") or "")
     elif tool == "run_script":
         extra = str(inp.get("file") or (inp.get("code") or "").strip().splitlines()[0:1])[:80]
+    elif tool == "idamap_annotate":
+        extra = "“%s”" % str(inp.get("name_suggestion") or inp.get("summary") or "")[:60]
     elif tool in ("declare_type", "apply_types"):
         extra = str(inp.get("decl") or inp.get("type_name") or "")[:60]
     elif tool == "callgraph":

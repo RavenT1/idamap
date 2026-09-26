@@ -14,7 +14,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Coverage flags stored in functions.flags (bitwise OR of everything that
 # happened to the function).
@@ -30,14 +30,16 @@ F_TYPED = 1 << 8         # types / stack vars applied
 F_PATCHED = 1 << 9
 F_FRAME = 1 << 10        # stack frame / type inference viewed
 F_LUMINA = 1 << 11       # lumina metadata applied
+F_EXPLAINED = 1 << 12    # the LLM recorded an explanation (idamap_annotate)
 
 FLAG_NAMES = {
     F_SEEN: "seen", F_DISASM: "disasm", F_DECOMP: "decompiled", F_XREF: "xrefs",
     F_CFG: "cfg", F_DATA: "data", F_RENAMED: "renamed", F_COMMENTED: "commented",
     F_TYPED: "typed", F_PATCHED: "patched", F_FRAME: "frame", F_LUMINA: "lumina",
+    F_EXPLAINED: "explained",
 }
 
-ANNOTATED = F_RENAMED | F_COMMENTED | F_TYPED | F_PATCHED | F_LUMINA
+ANNOTATED = F_RENAMED | F_COMMENTED | F_TYPED | F_PATCHED | F_LUMINA | F_EXPLAINED
 
 # Stages, lowest to highest. A function's stage is the highest one reached.
 STAGES = ["unseen", "seen", "explored", "disassembled", "decompiled", "annotated"]
@@ -167,6 +169,8 @@ CREATE TABLE IF NOT EXISTS functions (
     start TEXT NOT NULL,
     name TEXT,
     orig_name TEXT,
+    demangled TEXT,                    -- readable Swift/C++ name (from the full-map export)
+    is_lib INTEGER,                    -- IDA library function (FLIRT)
     size INTEGER,                      -- NULL = stub (start known, extent unknown)
     flags INTEGER DEFAULT 0,
     touch_count INTEGER DEFAULT 0,
@@ -211,6 +215,26 @@ CREATE TABLE IF NOT EXISTS comments (
     func_i INTEGER, text TEXT, repeatable INTEGER, call_id INTEGER, ts REAL
 );
 
+-- what a function references (from the full-map export): strings, ObjC
+-- selectors / class refs, imported symbols
+CREATE TABLE IF NOT EXISTS func_refs (
+    db_id INTEGER, func_i INTEGER, kind TEXT, value TEXT,
+    PRIMARY KEY (db_id, func_i, kind, value)
+);
+
+-- explanations written by the LLM (idamap_annotate) or a human; history is kept
+CREATE TABLE IF NOT EXISTS annotations (
+    id INTEGER PRIMARY KEY,
+    db_id INTEGER, func_i INTEGER,
+    source TEXT,                      -- llm | human
+    summary TEXT, name_suggestion TEXT, tags TEXT, framework TEXT,
+    confidence TEXT, evidence TEXT,
+    status TEXT,                      -- hypothesis | confirmed | rejected
+    call_id INTEGER, session_id TEXT, harness TEXT,
+    created_at REAL, reviewed_at REAL
+);
+CREATE INDEX IF NOT EXISTS annotations_func ON annotations(db_id, func_i);
+
 CREATE TABLE IF NOT EXISTS segments (
     db_id INTEGER, name TEXT, start TEXT, end TEXT, start_i INTEGER, end_i INTEGER,
     perms TEXT, type TEXT,
@@ -222,25 +246,34 @@ CREATE TABLE IF NOT EXISTS segments (
 def connect(path: Path | None = None) -> sqlite3.Connection:
     path = path or db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    fresh = not path.exists()  # e.g. the user deleted it while the server was running
     conn = sqlite3.connect(str(path), timeout=10, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA foreign_keys=OFF")
-    conn.executescript(SCHEMA)
-    _migrate(conn)
+    key = str(path.resolve())
+    if fresh or key not in _initialized:  # schema + migrations once per process and file
+        conn.executescript(SCHEMA)
+        _migrate(conn)
+        _initialized.add(key)
     return conn
+
+
+_initialized: set[str] = set()
 
 
 # columns added after schema v1 (CREATE TABLE IF NOT EXISTS won't add them to old files)
 _ADDED_COLUMNS = {
     "sessions": [("harness", "TEXT"), ("source", "TEXT")],
     "calls": [("harness", "TEXT")],
+    "functions": [("demangled", "TEXT"), ("is_lib", "INTEGER")],
 }
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    conn.execute("DROP TABLE IF EXISTS hints")  # never released; may exist from a development build
     for table, cols in _ADDED_COLUMNS.items():
         have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         for name, typ in cols:

@@ -50,6 +50,24 @@ def markdown(conn, db_id: int) -> str:
                      f"{', '.join(S.flag_list(f['flags']))} | {f['human_status'] or ''} | {_md(f['note'])} |")
     lines.append("")
 
+    expl = conn.execute(
+        """SELECT a.*, f.name, f.start FROM annotations a JOIN functions f ON f.db_id=a.db_id AND f.start_i=a.func_i
+           WHERE a.db_id=? AND a.status != 'rejected' ORDER BY f.start_i, a.id DESC""", (db_id,)).fetchall()
+    if expl:
+        lines += ["## LLM explanations", "",
+                  "Recorded by the model with `idamap_annotate`. **Unconfirmed** entries are hypotheses.", "",
+                  "| Function | Address | Status | Explanation | Suggested name | Framework | Confidence | Evidence |",
+                  "|---|---|---|---|---|---|---|---|"]
+        seen = set()
+        for a in expl:
+            if a["func_i"] in seen:  # latest non-rejected per function
+                continue
+            seen.add(a["func_i"])
+            status = "confirmed" if a["status"] == "confirmed" else "unconfirmed"
+            lines.append(f"| {_md(a['name'])} | `{a['start']}` | {status} | {_md(a['summary'])} | "
+                         f"{_md(a['name_suggestion'])} | {_md(a['framework'])} | {a['confidence'] or ''} | {_md(a['evidence'])} |")
+        lines.append("")
+
     if sm["renames"]:
         lines += ["## Renames", "", "| Address | Old | New | When |", "|---|---|---|---|"]
         for r in reversed(sm["renames"]):
@@ -108,8 +126,13 @@ def ida_sync_script(conn, db_id: int) -> str:
     rows = conn.execute(
         "SELECT start, name, flags, touch_count, human_status, note FROM functions "
         "WHERE db_id=? AND (flags != 0 OR human_status IS NOT NULL OR note IS NOT NULL)", (db_id,)).fetchall()
+    expl = {}
+    for a in conn.execute("SELECT f.start, a.summary, a.status FROM annotations a JOIN functions f "
+                          "ON f.db_id=a.db_id AND f.start_i=a.func_i WHERE a.db_id=? AND a.status != 'rejected' "
+                          "ORDER BY a.id", (db_id,)):
+        expl[a["start"]] = ("" if a["status"] == "confirmed" else "(unconfirmed) ") + a["summary"]
     data = [[r["start"], S.stage_of(r["flags"]), ", ".join(S.flag_list(r["flags"])), r["touch_count"],
-             r["human_status"], r["note"]] for r in rows]
+             r["human_status"], r["note"], expl.get(r["start"])] for r in rows]
     d = conn.execute("SELECT name, key FROM databases WHERE id=?", (db_id,)).fetchone()
     title = f"{d['name']} ({d['key']})".replace("\n", " ").replace("\r", " ")
     return f'''# idamap → IDA coverage sync for {title}
@@ -123,7 +146,7 @@ import ida_funcs, idc
 
 CLEAR = False
 COLORS = json.loads({json.dumps(IDA_COLORS)!r})
-# [start, stage, what happened, calls, human review, note]
+# [start, stage, what happened, calls, human review, note, LLM explanation]
 DATA = json.loads({json.dumps(data)!r})
 TAG = "[idamap]"
 
@@ -131,7 +154,7 @@ def strip_tag(cmt):
     return "\\n".join(l for l in (cmt or "").split("\\n") if not l.startswith(TAG)).strip()
 
 n = 0
-for start, stage, what, touches, human, note in DATA:
+for start, stage, what, touches, human, note, explanation in DATA:
     ea = int(start, 16)
     f = ida_funcs.get_func(ea)
     if not f:
@@ -147,6 +170,8 @@ for start, stage, what, touches, human, note in DATA:
             tag += " | human: " + human
         if note:
             tag += "\\n%s note: %s" % (TAG, note.replace("\\n", " "))
+        if explanation:
+            tag += "\\n%s LLM: %s" % (TAG, explanation.replace("\\n", " "))
         ida_funcs.set_func_cmt(f, (old + "\\n" + tag).strip(), True)
     ida_funcs.update_func(f)
     n += 1

@@ -21,6 +21,7 @@ warnings.simplefilter("ignore", DeprecationWarning)
 
 import ida_funcs
 import ida_loader
+import ida_name
 import ida_nalt
 import ida_segment
 import ida_xref
@@ -55,6 +56,85 @@ def _hex(b):
     return b.hex() if isinstance(b, (bytes, bytearray)) else None
 
 
+REF_BUDGET_SECS = 240      # stop collecting references on huge binaries (map stays complete)
+REFS_PER_KIND = 25
+
+
+def _seg(ea):
+    s = ida_segment.getseg(ea)
+    return ida_segment.get_segm_name(s) if s else ""
+
+
+def _demangle(name):
+    try:
+        d = ida_name.demangle_name(name, ida_name.MNG_SHORT_FORM) or ida_name.demangle_name(name, 0)
+    except Exception:
+        d = None
+    return d if d and d != name else None
+
+
+def _funcs_referencing(ea, depth=2):
+    """Functions whose code references ea, directly or through one data item
+    (cfstring -> cstring, selref -> methname, GOT -> import)."""
+    out = set()
+    for x in idautils.XrefsTo(ea, 0):
+        f = ida_funcs.get_func(x.frm)
+        if f:
+            out.add(f.start_ea)
+        elif depth > 1:
+            out |= _funcs_referencing(idc.get_item_head(x.frm), depth - 1)
+        if len(out) > 400:  # hugely shared item (e.g. a common selector): enough
+            break
+    return out
+
+
+def collect_refs(deadline):
+    refs = {}
+    counts = {}
+
+    def add(f, kind, value):
+        k = (f, kind)
+        if counts.get(k, 0) >= REFS_PER_KIND:
+            return
+        bucket = refs.setdefault(f, set())
+        if (kind, value) not in bucket:
+            bucket.add((kind, value))
+            counts[k] = counts.get(k, 0) + 1
+
+    complete = True
+    for s in idautils.Strings():
+        if time.time() > deadline:
+            complete = False
+            break
+        sg = _seg(s.ea)
+        if sg in ("HEADER", "__swift5_reflstr", "__swift5_typeref", "__swift5_fieldmd"):
+            continue
+        kind = "sel" if sg == "__objc_methname" else "str"
+        text = str(s)[:160]
+        for f in _funcs_referencing(s.ea):
+            add(f, kind, text)
+
+    def on_import(ea, name, _ord):
+        if name and time.time() <= deadline:
+            for f in _funcs_referencing(ea):
+                add(f, "import", name)
+        return True
+
+    for i in range(ida_nalt.get_import_module_qty()):
+        ida_nalt.enum_import_names(i, on_import)
+
+    for s_ea in idautils.Segments():
+        if _seg(s_ea) != "__objc_classrefs":
+            continue
+        seg = ida_segment.getseg(s_ea)
+        for h in idautils.Heads(seg.start_ea, seg.end_ea):
+            name = ida_name.get_name(h) or ""
+            cls = name.replace("classRef_", "").replace("_OBJC_CLASS_$_", "")
+            for f in _funcs_referencing(h, 1):
+                add(f, "class", cls)
+    return {"%d" % f: sorted(v) for f, v in refs.items()}, complete and time.time() <= deadline
+
+
 def main():
     started = time.time()
     funcs = []
@@ -63,7 +143,8 @@ def main():
         f = ida_funcs.get_func(ea)
         if not f:
             continue
-        funcs.append([f.start_ea, f.end_ea, ida_funcs.get_func_name(f.start_ea) or ("sub_%X" % f.start_ea)])
+        name = ida_funcs.get_func_name(f.start_ea) or ("sub_%X" % f.start_ea)
+        funcs.append([f.start_ea, f.end_ea, name, _demangle(name), 1 if f.flags & ida_funcs.FUNC_LIB else 0])
         starts.add(f.start_ea)
 
     edges = set()
@@ -82,6 +163,8 @@ def main():
         segs.append({"name": ida_segment.get_segm_name(s), "start": s.start_ea, "end": s.end_ea,
                      "perms": perms, "type": {2: "CODE", 3: "DATA", 4: "BSS", 1: "XTRN"}.get(s.type, str(s.type))})
 
+    refs, refs_complete = collect_refs(started + REF_BUDGET_SECS)
+
     lo, hi = _minmax()
     sha = _hex(ida_nalt.retrieve_input_file_sha256())
     idb_path = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
@@ -99,6 +182,8 @@ def main():
         "segments": segs,
         "functions": funcs,
         "edges": sorted(edges),
+        "refs": refs,
+        "refs_complete": refs_complete,
     }
     out_dir = os.path.join(os.environ.get("IDAMAP_HOME") or os.path.expanduser("~/.idamap"), "exports")
     os.makedirs(out_dir, exist_ok=True)
@@ -106,8 +191,9 @@ def main():
     path = os.path.join(out_dir, "%s-%s.json" % (base, (sha or "nosha")[:8]))
     with open(path, "w") as fh:
         json.dump(data, fh)
-    print("IDAMAP_EXPORT_FILE=%s functions=%d edges=%d segments=%d (%.1fs)"
-          % (path, len(funcs), len(edges), len(segs), time.time() - started))
+    print("IDAMAP_EXPORT_FILE=%s functions=%d edges=%d refs=%d%s (%.1fs)"
+          % (path, len(funcs), len(edges), sum(len(v) for v in refs.values()),
+             "" if refs_complete else " (refs truncated: time budget)", time.time() - started))
 
 
 main()

@@ -28,6 +28,7 @@
   --cat-types: #e46fa8;
   --cat-edit: #b67cf0;
   --cat-script: #ef5b5b;
+  --cat-idamap: #5eb1ff;
   --cat-other: #7b8699;
 
   --hu-todo: #8490a5;
@@ -330,3 +331,35 @@ pre.out {
   .tl-call .dur { display: none; }
   .tl-call .err { padding-left: 8px; }
 }
+
+/* ---------- names / explanations / references ---------- */
+.dem { font: 11px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 520px; }
+.dem.big { font-size: 12px; white-space: normal; word-break: break-all; margin-bottom: 4px; max-width: none; }
+.fn-summary { font-size: 11.5px; color: var(--muted); font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 520px; }
+.tip-summary { margin: 4px 0; font-style: italic; }
+.expl-list { display: flex; flex-direction: column; gap: 8px; }
+.expl { border: 1px solid var(--line2); border-left: 3px solid var(--warn); border-radius: 6px; padding: 8px 10px; background: var(--panel2); }
+.expl.confirmed { border-left-color: var(--ok); }
+.expl.rejected { border-left-color: var(--danger); opacity: .6; }
+.expl.older { opacity: .75; }
+.expl-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.expl-summary { margin: 4px 0; white-space: pre-wrap; word-break: break-word; }
+.expl-evidence { font-size: 12px; color: var(--muted); margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+.expl-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.conf { font-size: 11px; font-weight: 600; }
+.badge.st-hypothesis { background: var(--warn); }
+.badge.st-confirmed { background: var(--ok); }
+.badge.st-rejected { background: var(--danger); }
+.btn.sm { padding: 2px 8px; font-size: 12px; }
+.btn.ok:hover { border-color: var(--ok); color: var(--ok); }
+.btn.bad:hover { border-color: var(--danger); color: var(--danger); }
+.refs { margin-bottom: 8px; }
+.refs .lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: .5px; color: var(--faint); margin: 6px 0 3px; }
+.refchips { display: flex; flex-wrap: wrap; gap: 4px; }
+.ref { font: 11.5px var(--mono); background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ref-sel { color: var(--st-explored); }
+.ref-class { color: var(--st-annotated); }
+.ref-import { color: var(--st-disassembled); }
+.setting { border: 1px solid var(--line2); border-radius: 8px; padding: 12px 14px; margin: 14px 0; }
+.toggle.big { font-size: 13px; color: var(--text); }

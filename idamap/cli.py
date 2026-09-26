@@ -108,6 +108,11 @@ def cmd_status(a) -> int:
         p = _settings_path(scope, a.project_dir)
         on = p.exists() and MARK in p.read_text()
         print(f"hooks    : {scope:<7} {'installed' if on else '-':<10} {p}")
+    from . import config
+
+    for k, v in config.load().items():
+        print(f"setting  : {k} = {'on' if v is True else 'off' if v is False else v}")
+    print("proxy    : route any MCP client through `idamap proxy -- ida-mcp` (see `idamap mcp-config`)")
     conn = S.connect()
     for d in Q.databases(conn):
         total = d["func_total"] or d["known"]
@@ -156,17 +161,47 @@ def cmd_export_script(a) -> int:
 
 
 def cmd_proxy(a) -> int:
-    from . import proxy
+    from . import config, proxy
 
+    virtual = config.get("annotate_tools") if a.annotate_tools is None else a.annotate_tools
     if a.listen or a.upstream:
         if not (a.listen and a.upstream):
             sys.stderr.write("idamap proxy: --listen and --upstream go together\n")
             return 2
-        return proxy.run_http(a.listen, a.upstream, a.harness)
+        return proxy.run_http(a.listen, a.upstream, a.harness, virtual)
     cmd = list(a.command)
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
-    return proxy.run_stdio(cmd, a.harness)
+    if cmd and not shutil.which(cmd[0]) and not Path(cmd[0]).exists():
+        sys.stderr.write(f"idamap proxy: '{cmd[0]}' not found. Pass the full path, e.g. idamap proxy -- /path/to/ida-mcp\n")
+        return 127
+    proxy.exit_now(proxy.run_stdio(cmd, a.harness, virtual))
+    return 0  # unreachable
+
+
+def cmd_config(a) -> int:
+    from . import config
+
+    if a.key is None:
+        for k, v in config.load().items():
+            print(f"{k:<16} {'on' if v is True else 'off' if v is False else v}   # {config.DESCRIPTIONS.get(k, '')}")
+        print(f"\n(file: {S.home() / 'config.json'})")
+        return 0
+    if a.key not in config.DEFAULTS:
+        sys.stderr.write(f"unknown setting {a.key!r}; known: {', '.join(config.DEFAULTS)}\n")
+        return 2
+    if a.value is None:
+        print(config.get(a.key))
+        return 0
+    val = a.value.lower()
+    if val not in ("on", "off", "true", "false", "1", "0", "yes", "no"):
+        sys.stderr.write("value must be on or off\n")
+        return 2
+    config.set_value(a.key, val in ("on", "true", "1", "yes"))
+    print(f"{a.key} = {'on' if config.get(a.key) else 'off'}")
+    if a.key == "annotate_tools":
+        print("Takes effect for proxies started from now on (restart your MCP client).")
+    return 0
 
 
 def _proxy_argv() -> list[str]:
@@ -276,8 +311,17 @@ def main(argv=None) -> int:
     s.add_argument("--listen", help="HTTP mode: address to listen on (host:port)")
     s.add_argument("--upstream", help="HTTP mode: URL of `ida-mcp serve-http`")
     s.add_argument("--harness", help="label for the client (default: from MCP clientInfo)")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--annotate-tools", dest="annotate_tools", action="store_true", default=None,
+                   help="offer idamap_annotate / idamap_lookup to the LLM (default: `idamap config annotate_tools`)")
+    g.add_argument("--no-annotate-tools", dest="annotate_tools", action="store_false")
     s.add_argument("command", nargs=argparse.REMAINDER, help="stdio mode: server command (default: ida-mcp)")
     s.set_defaults(fn=cmd_proxy)
+
+    s = sub.add_parser("config", help="show or change settings (optional features are off by default)")
+    s.add_argument("key", nargs="?")
+    s.add_argument("value", nargs="?", help="on | off")
+    s.set_defaults(fn=cmd_config)
 
     s = sub.add_parser("mcp-config", help="print MCP client config snippets that route ida-mcp through idamap")
     s.add_argument("--client", default="all",

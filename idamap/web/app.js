@@ -65,8 +65,8 @@ function dur(ms) { if (ms == null) return ""; return ms < 1000 ? `${ms}ms` : `${
 const addrNum = (hex) => Number(BigInt(hex));
 
 // ------------------------------------------------------------------ domain
-const F = { SEEN: 1, DISASM: 2, DECOMP: 4, XREF: 8, CFG: 16, DATA: 32, RENAMED: 64, COMMENTED: 128, TYPED: 256, PATCHED: 512, FRAME: 1024, LUMINA: 2048 };
-const ANNOTATED = F.RENAMED | F.COMMENTED | F.TYPED | F.PATCHED | F.LUMINA;
+const F = { SEEN: 1, DISASM: 2, DECOMP: 4, XREF: 8, CFG: 16, DATA: 32, RENAMED: 64, COMMENTED: 128, TYPED: 256, PATCHED: 512, FRAME: 1024, LUMINA: 2048, EXPLAINED: 4096 };
+const ANNOTATED = F.RENAMED | F.COMMENTED | F.TYPED | F.PATCHED | F.LUMINA | F.EXPLAINED;
 const STAGES = ["unseen", "seen", "explored", "disassembled", "decompiled", "annotated"];
 const STAGE_LABEL = { unseen: "not looked at", seen: "seen in results", explored: "xrefs explored", disassembled: "disassembled", decompiled: "decompiled", annotated: "annotated" };
 function stageOf(f) {
@@ -80,7 +80,7 @@ function stageOf(f) {
 const stageRank = (s) => STAGES.indexOf(s);
 const PILLS = [["D", F.DECOMP, "decompiled"], ["A", F.DISASM, "disassembly"], ["B", F.CFG, "basic blocks"], ["X", F.XREF, "xrefs / callers / callees"],
   ["F", F.FRAME, "stack frame / types viewed"], ["M", F.DATA, "memory read"], ["R", F.RENAMED, "renamed"], ["C", F.COMMENTED, "commented"],
-  ["T", F.TYPED, "types applied"], ["P", F.PATCHED, "patched"]];
+  ["T", F.TYPED, "types applied"], ["P", F.PATCHED, "patched"], ["E", F.EXPLAINED, "explained by the LLM (idamap_annotate)"]];
 const HUMAN = ["todo", "in_progress", "reviewed", "interesting", "suspicious", "ignore"];
 const HUMAN_LABEL = { todo: "To do", in_progress: "In progress", reviewed: "Reviewed", interesting: "Interesting", suspicious: "Suspicious", ignore: "Ignore" };
 const stColor = (s) => css(`--st-${s}`);
@@ -108,6 +108,7 @@ const state = {
 async function boot() {
   applyTheme(store.get("theme", null));
   state.info = await api("/api/info");
+  await loadConfig();
   await loadDbs();
   const m = location.hash.match(/db=(\d+)/);
   const want = m ? +m[1] : store.get("db", null);
@@ -157,9 +158,9 @@ function ingestFunctions(res, reset) {
   if (reset) state.funcs.clear();
   let structural = reset;
   for (const r of res.functions) {
-    const [start, name, size, flags, touches, last, first, human, orig, note] = r;
+    const [start, name, size, flags, touches, last, first, human, orig, note, dem, summary, annStatus] = r;
     if (!state.funcs.has(start)) structural = true;
-    state.funcs.set(start, { start, name, size, flags, touches, last, first, human, orig, note, n: addrNum(start) });
+    state.funcs.set(start, { start, name, size, flags, touches, last, first, human, orig, note, dem, summary, annStatus, n: addrNum(start) });
   }
   if (structural) state.order = [...state.funcs.values()].sort((a, b) => (a.n < b.n ? -1 : a.n > b.n ? 1 : 0)).map((f) => f.start);
   state.funcsNow = res.now;
@@ -256,7 +257,11 @@ function countStages() {
   return c;
 }
 
-function fnName(start) { return state.funcs.get(start)?.name || start; }
+// Mangled Swift / C++ / MSVC names are unreadable: show the demangled form instead.
+const MANGLED = /^_*(\$[sS]|T0|Z[NLS]?\d|\?)/;
+function displayName(name, dem) { return dem && MANGLED.test(name || "") ? dem : name; }
+function fnDisplay(f) { return displayName(f.name, f.dem); }
+function fnName(start) { const f = state.funcs.get(start); return f ? fnDisplay(f) : start; }
 
 function updateNowBar() {
   const bar = $("#nowBar"), txt = $("#nowText");
@@ -286,9 +291,11 @@ function updateNowBar() {
 
 function fnLink(start, name) {
   const f = state.funcs.get(start);
-  return h("span", { class: "fn", title: start, onclick: (e) => { e.stopPropagation(); openFunction(start); } },
+  const label = f ? fnDisplay(f) : (name || start);
+  return h("span", { class: "fn", title: f && label !== f.name ? `${f.name}\n${start}` : start,
+    onclick: (e) => { e.stopPropagation(); openFunction(start); } },
     h("span", { class: "dot", style: { background: stColor(stageOf(f?.flags || 0)) } }),
-    h("span", { class: "fname" }, name || fnName(start)));
+    h("span", { class: "fname" }, label));
 }
 
 // ------------------------------------------------------------------ tabs
@@ -402,8 +409,21 @@ function renderOverview() {
       h("div", { class: "card" }, h("h3", null, "Activity (calls / minute)"), sparkline(s.activity)),
       h("div", { class: "card" }, h("h3", null, "Tool usage"), tools),
       h("div", { class: "card" }, h("h3", null, "Recent renames"), renames),
-      h("div", { class: "card" }, h("h3", null, "Recent comments"), comments))));
+      h("div", { class: "card" }, h("h3", null, "Recent comments"), comments),
+      h("div", { class: "card" }, h("h3", null, "Recent LLM explanations"), explanationsList(s)))));
   fill(root, ...kids);
+}
+
+function explanationsList(s) {
+  const list = s.explanations || [];
+  if (!list.length) return h("div", { class: "muted" }, "None yet. " + EXPLAIN_HOWTO);
+  const c = s.explanation_counts || {};
+  return [h("div", { class: "muted small", style: { marginBottom: "6px" } },
+    `${c.hypothesis || 0} unconfirmed · ${c.confirmed || 0} confirmed · ${c.rejected || 0} rejected`),
+  h("ul", { class: "list" }, list.slice(0, 10).map((e) => h("li", null,
+    fnLink(e.func, state.funcs.get(e.func)?.name || e.name),
+    h("span", { class: "grow muted small" }, e.summary),
+    h("span", { class: `badge st-${e.status}` }, e.status === "hypothesis" ? "?" : e.status === "confirmed" ? "✓" : "✗"))))];
 }
 
 function sessionsList(list) {
@@ -475,9 +495,15 @@ function mapVisible(f) {
   if (mapState.mode === "stage" && mapState.hidden.has(stageOf(f.flags))) return false;
   return true;
 }
+// name / address / original name / demangled name / explanation
+function fnMatches(f, q) {
+  return f.name?.toLowerCase().includes(q) || f.start.includes(q) || f.orig?.toLowerCase().includes(q) ||
+    f.dem?.toLowerCase().includes(q) || f.summary?.toLowerCase().includes(q);
+}
+
 function mapMatches(f) {
   const q = mapState.search;
-  return q && (f.name?.toLowerCase().includes(q) || f.start.includes(q) || f.orig?.toLowerCase().includes(q));
+  return q && fnMatches(f, q);
 }
 
 function renderMapLegend() {
@@ -641,8 +667,10 @@ function showTip(ev, f) {
   const tip = $("#mapTip");
   if (!f) { tip.hidden = true; return; }
   fill(tip, 
-    h("b", null, f.name), h("div", { class: "muted mono small" }, `${f.start}${f.size ? ` · ${f.size} bytes` : ""}`),
+    h("b", null, fnDisplay(f)), h("div", { class: "muted mono small" }, `${f.start}${f.size ? ` · ${f.size} bytes` : ""}`),
+    fnDisplay(f) !== f.name ? h("div", { class: "faint small mono raw" }, f.name) : f.dem && f.dem !== f.name ? h("div", { class: "muted small mono" }, f.dem) : null,
     f.orig ? h("div", { class: "faint small" }, `was ${f.orig}`) : null,
+    f.summary ? h("div", { class: "tip-summary" }, f.summary, f.annStatus === "confirmed" ? " ✓" : "") : null,
     h("div", null, h("span", { class: "sw", style: { background: stColor(stageOf(f.flags)), marginRight: "5px" } }), STAGE_LABEL[stageOf(f.flags)],
       f.touches ? ` · ${f.touches} calls` : "", f.last ? ` · ${ago(f.last)}` : ""),
     f.human ? h("div", { style: { color: huColor(f.human) } }, "● " + HUMAN_LABEL[f.human]) : null,
@@ -669,7 +697,8 @@ async function loadGraph(force) {
 function nodeData(n) {
   const f = state.funcs.get(n.id);
   const flags = f ? f.flags : n.flags;
-  return { id: n.id, label: f?.name || n.name, stage: stageOf(flags), color: stColor(stageOf(flags)),
+  const label = f ? fnDisplay(f) : n.name;
+  return { id: n.id, label: label.length > 44 ? label.slice(0, 42) + "…" : label, stage: stageOf(flags), color: stColor(stageOf(flags)),
     w: 16 + Math.min(34, 7 * Math.log2(1 + (f?.touches ?? n.touches))), frontier: n.frontier ? 1 : 0,
     human: f?.human || n.human || "", hcolor: (f?.human || n.human) ? huColor(f?.human || n.human) : "transparent" };
 }
@@ -754,8 +783,8 @@ function renderFunctions() {
   const q = fnState.q;
   let rows = [...state.funcs.values()].filter((f) => fnState.stages.has(stageOf(f.flags)) &&
     (!fnState.human || (fnState.human === "none" ? !f.human : f.human === fnState.human)) &&
-    (!q || f.name?.toLowerCase().includes(q) || f.start.includes(q) || f.orig?.toLowerCase().includes(q)));
-  const key = { name: (f) => (f.name || "").toLowerCase(), addr: (f) => f.n, size: (f) => f.size || 0, stage: (f) => stageRank(stageOf(f.flags)) * 1e6 + (f.touches || 0),
+    (!q || fnMatches(f, q)));
+  const key = { name: (f) => (fnDisplay(f) || "").toLowerCase(), addr: (f) => f.n, size: (f) => f.size || 0, stage: (f) => stageRank(stageOf(f.flags)) * 1e6 + (f.touches || 0),
     touches: (f) => f.touches || 0, last: (f) => f.last || 0, human: (f) => f.human || "" }[fnState.sort];
   rows.sort((a, b) => { const x = key(a), y = key(b); return (x < y ? -1 : x > y ? 1 : 0) * (fnState.asc ? 1 : -1); });
   $("#fnCount").textContent = `${rows.length.toLocaleString()} of ${state.funcs.size.toLocaleString()} known functions`;
@@ -764,8 +793,10 @@ function renderFunctions() {
   fill(body, ...rows.slice(0, fnState.limit).map((f) => {
     const st = stageOf(f.flags);
     return h("tr", { onclick: () => openFunction(f.start) },
-      h("td", null, h("span", { class: "fn" }, h("span", { class: "dot", style: { background: stColor(st) } }), h("span", { class: "fname" }, f.name)),
-        f.orig ? h("span", { class: "was" }, `was ${f.orig}`) : null, f.note ? h("span", { class: "faint", title: "has note" }, " ✎") : null),
+      h("td", null, h("span", { class: "fn" }, h("span", { class: "dot", style: { background: stColor(st) } }), h("span", { class: "fname" }, fnDisplay(f))),
+        f.orig ? h("span", { class: "was" }, `was ${f.orig}`) : null, f.note ? h("span", { class: "faint", title: "has note" }, " ✎") : null,
+        fnDisplay(f) !== f.name ? h("div", { class: "dem" }, f.name) : f.dem && f.dem !== f.name ? h("div", { class: "dem" }, f.dem) : null,
+        f.summary ? h("div", { class: "fn-summary", title: f.summary }, f.annStatus === "confirmed" ? "✓ " : "", f.summary) : null),
       h("td", { class: "mono muted" }, f.start),
       h("td", { class: "num muted" }, f.size ?? "?"),
       h("td", null, h("span", { class: "badge", style: { background: stColor(st) } }, st)),
@@ -969,9 +1000,13 @@ async function refreshDrawer(reset) {
       await post(`/api/db/${state.db}/function/${start}`, { note: ta.value }); saved.textContent = "saved"; refreshFunctions(); }, 600); } });
   ta.value = d.note || "";
   const chips = (list) => list.length ? h("div", { class: "fnchips" }, list.map((f) => fnLink(f.start, f.name))) : h("div", { class: "muted small" }, "none known");
+  const REF_LABEL = { str: "Strings", sel: "Objective-C selectors", class: "Objective-C classes", import: "Imported symbols" };
+  const refs = Object.entries(d.references || {});
 
   fill(body,
-    h("h2", null, d.name),
+    h("h2", null, displayName(d.name, d.demangled)),
+    displayName(d.name, d.demangled) !== d.name ? h("div", { class: "dem big" }, d.name)
+      : d.demangled && d.demangled !== d.name ? h("div", { class: "dem big" }, d.demangled) : null,
     h("div", { class: "meta" },
       h("span", { class: "mono" }, d.start), d.size ? h("span", null, `${d.size} bytes`) : h("span", { class: "faint" }, "size unknown"),
       h("span", { class: "badge", style: { background: stColor(d.stage) } }, d.stage), pills(d.flags),
@@ -979,13 +1014,19 @@ async function refreshDrawer(reset) {
     d.orig_name && d.orig_name !== d.name ? h("div", { class: "muted small", style: { marginTop: "4px" } }, "originally ", h("span", { class: "mono" }, d.orig_name)) : null,
     h("div", { class: "muted small", style: { marginTop: "4px" } },
       d.touch_count ? `${d.touch_count} targeted calls · first ${ago(d.first_touched)} · last ${ago(d.last_touched)}` : "never targeted directly"),
+    understanding(d, start),
     h("h4", null, "Your review"), hs,
     h("h4", null, "Notes"), ta, saved,
     d.renames.length ? [h("h4", null, "Renames"), h("ul", { class: "list" }, d.renames.map((r) =>
       h("li", null, h("span", { class: "grow mono small" }, h("span", { class: "faint" }, r.old_name || "?"), " → ", r.new_name), h("span", { class: "faint small" }, ago(r.ts)))))] : null,
     d.comments.length ? [h("h4", null, "Comments set"), h("ul", { class: "list" }, d.comments.map((c) =>
       h("li", null, h("span", { class: "mono faint small" }, c.addr), h("span", { class: "grow" }, c.text))))] : null,
-    d.strings.length ? [h("h4", null, "Strings referenced"), h("ul", { class: "list" }, d.strings.map((s) => h("li", null, h("span", { class: "grow mono small" }, `"${s}"`))))] : null,
+    d.strings.length ? [h("h4", null, "Strings seen in xref results"), h("ul", { class: "list" }, d.strings.map((s) => h("li", null, h("span", { class: "grow mono small" }, `"${s}"`))))] : null,
+    refs.length ? [h("h4", null, "References"), refs.map(([kind, vals]) => h("div", { class: "refs" },
+      h("div", { class: "lbl" }, `${REF_LABEL[kind] || kind} (${vals.length})`),
+      h("div", { class: "refchips" }, vals.map((v) => h("span", { class: `ref ref-${kind}`, title: v }, kind === "str" ? `"${v}"` : v)))))] :
+      (state.dbs.find((x) => x.id === state.db)?.map_imported_at ? null :
+        h("div", { class: "muted small", style: { marginTop: "14px" } }, "Import the full map (Overview) to see the strings, selectors, classes and imports this function references.")),
     h("h4", null, `Callers (${d.callers.length})`), chips(d.callers),
     h("h4", null, `Callees (${d.callees.length})`), chips(d.callees),
     d.decompile ? [h("h4", null, `Latest pseudocode · ${ago(d.decompile.ts)}`), h("pre", { class: "out" }, highlightC(d.decompile.text))] : null,
@@ -998,6 +1039,71 @@ async function refreshDrawer(reset) {
         h("span", { class: "faint small" }, c.status === "error" ? "✗" : dur(c.duration_ms))),
       c.intent ? h("div", { class: "intent" }, c.intent.split("\n")[0]) : null)) : h("li", { class: "muted" }, "No calls recorded.")),
   );
+}
+
+// ------------------------------------------------------------------ explanations
+const CONF_COLOR = { high: "--ok", medium: "--warn", low: "--faint" };
+// the feature can be on globally (Settings) or for one client (--annotate-tools), so don't claim it's off
+const EXPLAIN_HOWTO = "The LLM records explanations with idamap_annotate when the proxy offers it (Settings ⚙ or idamap proxy --annotate-tools).";
+
+function understanding(d, start) {
+  const list = d.explanations || [];
+  if (!list.length) {
+    return [h("h4", null, "Understanding"), h("div", { class: "muted small" }, "No explanation yet. " + EXPLAIN_HOWTO)];
+  }
+  return [h("h4", null, `Understanding (${list.length})`), h("div", { class: "expl-list" }, list.map((a, i) => h("div", {
+    class: `expl ${a.status}` + (i > 0 ? " older" : ""),
+  },
+    h("div", { class: "expl-head" },
+      h("span", { class: `badge st-${a.status}` }, a.status === "hypothesis" ? "unconfirmed" : a.status),
+      a.confidence ? h("span", { class: "conf", style: { color: css(CONF_COLOR[a.confidence]) } }, `${a.confidence} confidence`) : null,
+      a.framework ? h("span", { class: "hn" }, a.framework) : null,
+      h("span", { class: "grow" }),
+      h("span", { class: "faint small" }, `${a.harness || a.source} · ${ago(a.created_at)}`)),
+    a.name_suggestion ? h("div", { class: "mono small" }, "suggested name: ", h("b", null, a.name_suggestion)) : null,
+    h("div", { class: "expl-summary" }, a.summary),
+    a.tags?.length ? h("div", { class: "chips" }, a.tags.map((t) => h("span", { class: "chip" }, t))) : null,
+    a.evidence ? h("div", { class: "expl-evidence" }, h("span", { class: "faint" }, "evidence: "), a.evidence) : null,
+    h("div", { class: "expl-actions" },
+      a.status !== "confirmed" ? h("button", { class: "btn sm ok", onclick: () => review(a.id, "confirmed") }, "✓ Confirm") : null,
+      a.status !== "rejected" ? h("button", { class: "btn sm bad", onclick: () => review(a.id, "rejected") }, "✗ Reject") : null,
+      a.status !== "hypothesis" ? h("button", { class: "btn sm", onclick: () => review(a.id, "hypothesis") }, "Undo review") : null,
+      a.name_suggestion ? h("button", { class: "btn sm", title: "Copy an IDAPython rename line", onclick: (e) =>
+        copy(`idc.set_name(${start}, ${JSON.stringify(a.name_suggestion)}, idc.SN_NOWARN)`, e.target) }, "Copy rename") : null),
+  )))];
+}
+
+async function review(id, status) {
+  await post(`/api/db/${state.db}/annotation/${id}`, { status });
+  refreshFunctions();
+  refreshSummary();
+  refreshDrawer(true);
+}
+
+// ------------------------------------------------------------------ settings
+async function loadConfig() {
+  try { const c = await api("/api/config"); state.config = c.values; state.configDesc = c.descriptions; } catch { state.config = {}; }
+}
+
+function openSettings() {
+  state.drawerFn = null;
+  $("#drawer").classList.add("open");
+  const cfgRow = (key, title, body) => h("div", { class: "setting" },
+    h("label", { class: "toggle big" },
+      h("input", { type: "checkbox", checked: !!state.config[key], onchange: async (e) => {
+        const r = await post("/api/config", { key, value: e.target.checked });
+        state.config = r.values; renderTab(true);
+      } }), h("b", null, title)),
+    body);
+  fill($("#drawerBody"),
+    h("h2", null, "Settings"),
+    h("div", { class: "muted small" }, "Optional features are off by default."),
+    cfgRow("annotate_tools", "LLM explanations (idamap_annotate / idamap_lookup)", [
+      h("p", { class: "muted" }, "The idamap proxy offers the LLM two extra tools. idamap_annotate records what the LLM understood about a function (summary, suggested name, tags, framework, confidence, evidence) as an unconfirmed hypothesis you confirm or reject here. idamap_lookup lets it reuse earlier knowledge, so functions are not re-reversed in every session. Nothing is written to the IDA database."),
+      h("p", { class: "muted" }, "Needs the proxy (any MCP client): restart your MCP client after changing this. Claude Code hooks alone cannot add tools."),
+      h("pre", { class: "out" }, "idamap mcp-config        # client config snippets\nidamap proxy --annotate-tools -- ida-mcp   # force on for one client")]),
+    h("h4", null, "Data"),
+    h("div", { class: "muted small mono" }, state.info.db_path));
 }
 
 // ------------------------------------------------------------------ theme
@@ -1020,6 +1126,7 @@ function wireUi() {
   $("#followDb").checked = store.get("followDb", true);
   $("#followDb").addEventListener("change", (e) => store.set("followDb", e.target.checked));
   $("#themeBtn").addEventListener("click", toggleTheme);
+  $("#settingsBtn").addEventListener("click", async () => { await loadConfig(); openSettings(); });
   $("#drawerClose").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeDrawer(); $("#exportMenu").hidden = true; } });
   $("#exportBtn").addEventListener("click", (e) => { e.stopPropagation(); $("#exportMenu").hidden = !$("#exportMenu").hidden; });

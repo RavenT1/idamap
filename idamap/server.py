@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__
+from . import __version__, annotate, config
 from . import parse as P
 from . import queries as Q
 from . import report
@@ -37,6 +37,15 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quiet
         pass
 
+    def finish(self):
+        try:
+            super().finish()
+        finally:  # one short-lived thread per request: don't leave its connection to the GC
+            c = getattr(_local, "conn", None)
+            if c is not None:
+                c.close()
+                _local.conn = None
+
     # ---------------------------------------------------------------- helpers
     def _send(self, body: bytes, ctype: str, status: int = 200, extra: dict | None = None):
         self.send_response(status)
@@ -58,12 +67,45 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}") if n else {}
 
+    # ---------------------------------------------------------------- security
+    # The UI is a local tool without accounts. Two browser-borne attacks matter:
+    # DNS rebinding (a web page reads the API through an attacker hostname that
+    # resolves to 127.0.0.1) and cross-site writes (a page POSTs to localhost).
+    # Rejecting foreign Host headers stops the first; requiring a same-origin
+    # JSON request for every write stops the second.
+    def _allowed_hosts(self) -> set[str] | None:
+        host, port = self.server.server_address[:2]
+        if host in ("0.0.0.0", "::"):
+            return None  # user opted into LAN exposure (serve warns about it)
+        names = {host, "localhost", "127.0.0.1", "[::1]", "::1"}
+        return {f"{n}:{port}" for n in names} | {n for n in names if port == 80}
+
+    def _guard(self, write: bool) -> bool:
+        allowed = self._allowed_hosts()
+        hosthdr = (self.headers.get("Host") or "").lower()
+        if allowed is not None and hosthdr not in allowed:
+            self._err(403, "forbidden host")
+            return False
+        if write:
+            origin = self.headers.get("Origin")
+            if origin and urlparse(origin).netloc.lower() != hosthdr:
+                self._err(403, "cross-origin write refused")
+                return False
+            if self.command == "POST" and not (self.headers.get("Content-Type") or "").startswith("application/json"):
+                self._err(415, "application/json required")
+                return False
+        return True
+
     # ---------------------------------------------------------------- routing
     def do_GET(self):
+        if not self._guard(write=False):
+            return
         u = urlparse(self.path)
         qs = {k: v[-1] for k, v in parse_qs(u.query).items()}
         p = u.path
         try:
+            if p == "/api/config":
+                return self._json({"values": config.load(), "descriptions": config.DESCRIPTIONS})
             if p == "/api/info":
                 return self._json({"version": __version__, "db_path": str(S.db_path()),
                                    "export_script": str(EXPORT_SCRIPT),
@@ -108,9 +150,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(500, f"{type(e).__name__}: {e}")
 
     def do_POST(self):
+        if not self._guard(write=True):
+            return
         p = urlparse(self.path).path
         try:
             body = self._body()
+            if p == "/api/config":
+                if body.get("key") not in config.DEFAULTS or not isinstance(body.get("value"), bool):
+                    return self._err(400, "expected {key, value: bool}")
+                return self._json({"values": config.set_value(body["key"], body["value"])})
+            m = re.fullmatch(r"/api/db/(\d+)/annotation/(\d+)", p)
+            if m:
+                ok = annotate.set_status(conn(), int(m.group(1)), int(m.group(2)), str(body.get("status")))
+                return self._json({"ok": ok}, 200 if ok else 400)
             m = re.fullmatch(r"/api/db/(\d+)/function/(0x[0-9a-fA-F]+)", p)
             if m:
                 Q.set_human(conn(), int(m.group(1)), int(m.group(2), 16),
@@ -127,15 +179,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(500, f"{type(e).__name__}: {e}")
 
     def do_DELETE(self):
+        if not self._guard(write=True):
+            return
         m = re.fullmatch(r"/api/db/(\d+)", urlparse(self.path).path)
         if not m:
             return self._err(404, "not found")
-        db = int(m.group(1))
-        c = conn()
-        for t in ("calls", "functions", "touches", "edges", "renames", "comments", "segments"):
-            c.execute(f"DELETE FROM {t} WHERE db_id=?", (db,))
-        c.execute("UPDATE sessions SET db_id=NULL WHERE db_id=?", (db,))
-        c.execute("DELETE FROM databases WHERE id=?", (db,))
+        delete_database(conn(), int(m.group(1)))
         return self._json({"ok": True})
 
     # ---------------------------------------------------------------- static
@@ -145,8 +194,10 @@ class Handler(BaseHTTPRequestHandler):
         f = (WEB / p.lstrip("/")).resolve()
         if WEB.resolve() not in f.parents or not f.is_file():
             return self._err(404, "not found")
-        ctype = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
-        if ctype.startswith("text/") or ctype in ("application/javascript",):
+        # explicit types: on Windows mimetypes reads the registry and may say text/plain for .js
+        ctype = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml"}.get(
+            f.suffix) or mimetypes.guess_type(f.name)[0] or "application/octet-stream"
+        if ctype.startswith("text/"):
             ctype += "; charset=utf-8"
         self._send(f.read_bytes(), ctype)
 
@@ -195,12 +246,28 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
+def delete_database(c, db: int) -> None:
+    """Forget everything idamap recorded for one database (the IDA database itself is untouched)."""
+    c.execute("DELETE FROM call_aliases WHERE call_id IN (SELECT id FROM calls WHERE db_id=?)", (db,))
+    for t in ("calls", "functions", "touches", "edges", "renames", "comments", "segments", "func_refs", "annotations",
+              "workspace_ids"):
+        c.execute(f"DELETE FROM {t} WHERE db_id=?", (db,))
+    c.execute("UPDATE sessions SET db_id=NULL WHERE db_id=?", (db,))
+    c.execute("DELETE FROM databases WHERE id=?", (db,))
+    c.execute("DELETE FROM prompts WHERE id NOT IN (SELECT DISTINCT prompt_id FROM calls WHERE prompt_id IS NOT NULL)")
+    c.execute("DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM calls)")
+
+
 def serve(host: str = "127.0.0.1", port: int = 8777, open_browser: bool = False) -> None:
     S.connect().close()  # create schema
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
-    url = f"http://{host}:{port}/"
+    shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    url = f"http://{shown}:{port}/"
     print(f"idamap {__version__} — {url}  (db: {S.db_path()})")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        print("WARNING: listening beyond localhost. idamap has no authentication; anyone who can reach this "
+              "port can read your research data and the code snippets in it.")
     if open_browser:
         import webbrowser
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()

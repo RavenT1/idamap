@@ -75,6 +75,12 @@ class Recorder:
     def put(self, kind: str, payload: dict) -> None:
         self.q.put((kind, payload))
 
+    def flush(self, timeout: float = 2.0) -> None:
+        """Wait until everything queued so far is written (reads then see it)."""
+        done = threading.Event()
+        self.q.put(("flush", done))
+        done.wait(timeout)
+
     def close(self, timeout: float = 5.0) -> None:
         self.q.put(None)
         self.t.join(timeout)
@@ -88,15 +94,34 @@ class Recorder:
             if item is None:
                 return
             kind, p = item
+            if kind == "flush":
+                p.set()
+                continue
             try:
                 if conn is None:
                     conn = S.connect()
                 if kind == "pre":
                     ingest.on_pre(conn, p)
+                elif kind == "virtual":
+                    self._virtual(conn, p)
                 else:
                     ingest.on_post(conn, p, ok=(kind == "ok"))
             except Exception:  # noqa: BLE001
                 _log_error(f"record {kind} {p.get('tool_name')}")
+
+    @staticmethod
+    def _virtual(conn, p: dict) -> None:
+        """A call idamap answered itself: record it like any other call."""
+        from . import annotate, ingest
+
+        ingest.on_pre(conn, p)
+        tuid = p["tool_use_id"]
+        row = conn.execute("SELECT id FROM calls WHERE tool_use_id=?", (tuid,)).fetchone() or \
+            conn.execute("SELECT call_id AS id FROM call_aliases WHERE alias=?", (tuid,)).fetchone()
+        if p.get("_store_annotation"):
+            annotate.store_annotation(conn, p["session_id"], p.get("harness"), p["tool_input"],
+                                      row["id"] if row else None)
+        ingest.on_post(conn, p, ok=p.get("_ok", True))
 
 
 # --------------------------------------------------------------------------
@@ -116,13 +141,87 @@ def _text_of(result: dict) -> str:
 class Observer:
     """Pairs tools/call requests with their responses, per session."""
 
-    def __init__(self, recorder: Recorder, harness_override: str | None = None):
+    def __init__(self, recorder: Recorder, harness_override: str | None = None, virtual_tools: bool = False):
         self.rec = recorder
         self.override = harness_override
+        self.virtual = virtual_tools
         self.pending: dict[tuple[str, str], tuple] = {}
+        self.augment_ids: set[tuple[str, str]] = set()
         self.harness: dict[str, str] = {}
         self.lock = threading.Lock()
         self.cwd = os.getcwd()
+        self._local = threading.local()
+
+    # ---- idamap's own tools (opt-in) -------------------------------------
+    def _conn(self):
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = self._local.conn = S.connect()
+        return c
+
+    def intercept(self, session: str, msg) -> dict | None:
+        """Answer tools/call for idamap_* locally; None = forward to ida-mcp."""
+        if not self.virtual or not isinstance(msg, dict) or msg.get("method") != "tools/call" or "id" not in msg:
+            return None
+        from . import annotate
+
+        params = msg.get("params") or {}
+        name = params.get("name")
+        if name not in annotate.NAMES:
+            return None
+        meta = params.get("_meta") or {}
+        if isinstance(meta.get("io.modelcontextprotocol/clientInfo"), dict):
+            self.harness[session] = harness_name(meta["io.modelcontextprotocol/clientInfo"])
+        args = params.get("arguments") or {}
+        key = json.dumps(msg["id"])
+        payload = self._payload(session, key, name, args, meta.get("claudecode/toolUseId"))
+        store = False
+        self.rec.flush()  # earlier calls' results (functions, renames) must be visible
+        try:
+            conn = self._conn()
+            if name == annotate.ANNOTATE:
+                err = annotate.validate_annotation(args)
+                text = err or annotate.describe_annotate(conn, session, args)
+                ok, store = err is None, err is None
+            else:
+                text, ok = annotate.lookup(conn, session, args), True
+        except Exception as e:  # noqa: BLE001
+            _log_error(f"virtual tool {name}")
+            text, ok = f"idamap error: {e}", False
+        payload.update(_store_annotation=store, _ok=ok, duration_ms=0)
+        if ok:
+            payload["tool_response"] = [{"type": "text", "text": text}]
+        else:
+            payload["error"] = text
+        self.rec.put("virtual", payload)
+        result = {"content": [{"type": "text", "text": text}], "isError": not ok}
+        if meta.get("io.modelcontextprotocol/protocolVersion"):
+            result = {"resultType": "complete", **result}  # MCP 2026 results must say they are complete
+        return {"jsonrpc": "2.0", "id": msg["id"], "result": result}
+
+    def augment(self, session: str, msg):
+        """Add idamap's tools / instructions to tools/list, initialize and server/discover results."""
+        if not self.augment_ids or not isinstance(msg, dict) or "id" not in msg:
+            return None
+        key = (session, json.dumps(msg["id"]))
+        with self.lock:
+            if key not in self.augment_ids:
+                return None
+            self.augment_ids.discard(key)
+        from . import annotate
+
+        result = msg.get("result")
+        if not isinstance(result, dict):
+            return None
+        changed = False
+        if isinstance(result.get("tools"), list):
+            have = {t.get("name") for t in result["tools"] if isinstance(t, dict)}
+            result["tools"] = result["tools"] + [t for t in annotate.TOOLS if t["name"] not in have]
+            changed = True
+        if isinstance(result.get("instructions"), str) and annotate.INSTRUCTIONS not in result["instructions"]:
+            result["instructions"] += annotate.INSTRUCTIONS
+            changed = True
+        return msg if changed else None
 
     def _payload(self, session: str, key: str, name: str, args: dict, host_id: str | None = None) -> dict:
         p = {"session_id": session, "tool_use_id": f"{session}:{key}", "tool_name": f"mcp__ida__{name}",
@@ -144,6 +243,10 @@ class Observer:
             elif isinstance(meta.get("io.modelcontextprotocol/clientInfo"), dict):
                 # MCP 2026-07-28 is handshake-free: clientInfo rides on every request
                 self.harness[session] = harness_name(meta["io.modelcontextprotocol/clientInfo"])
+            if self.virtual and "id" in m and (method in ("initialize", "server/discover")
+                                               or (method == "tools/list" and not params.get("cursor"))):
+                with self.lock:
+                    self.augment_ids.add((session, json.dumps(m["id"])))
             if method == "tools/call" and "id" in m:
                 key = json.dumps(m["id"])
                 name, args = str(params.get("name", "?")), params.get("arguments") or {}
@@ -215,13 +318,20 @@ def _parse(data: bytes):
 # stdio proxy
 # --------------------------------------------------------------------------
 
-def run_stdio(cmd: list[str], harness: str | None = None) -> int:
+def run_stdio(cmd: list[str], harness: str | None = None, virtual_tools: bool = False) -> int:
     if not cmd:
         cmd = ["ida-mcp"]
     exe = shutil.which(cmd[0]) or cmd[0]
     session = f"stdio-{uuid.uuid4().hex[:12]}"
     rec = Recorder("proxy-stdio")
-    obs = Observer(rec, harness)
+    obs = Observer(rec, harness, virtual_tools)
+    out = sys.stdout.buffer
+    out_lock = threading.Lock()
+
+    def emit(data: bytes) -> None:
+        with out_lock:
+            out.write(data)
+            out.flush()
     try:
         child = subprocess.Popen([exe, *cmd[1:]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
     except OSError as e:
@@ -234,7 +344,10 @@ def run_stdio(cmd: list[str], harness: str | None = None) -> int:
         except OSError:
             pass
 
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    for name in ("SIGTERM", "SIGINT", "SIGHUP"):  # SIGHUP does not exist on Windows
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
         try:
             signal.signal(sig, stop)
         except (ValueError, OSError):
@@ -247,6 +360,15 @@ def run_stdio(cmd: list[str], harness: str | None = None) -> int:
                 line = src.readline()
                 if not line:
                     break
+                if obs.virtual and b"idamap_" in line and b"tools/call" in line:
+                    try:
+                        reply = obs.intercept(session, _parse(line))
+                    except Exception:  # noqa: BLE001
+                        _log_error("intercept")
+                        reply = None
+                    if reply is not None:
+                        emit(json.dumps(reply).encode() + b"\n")
+                        continue
                 child.stdin.write(line)
                 child.stdin.flush()
                 try:
@@ -265,16 +387,23 @@ def run_stdio(cmd: list[str], harness: str | None = None) -> int:
 
     threading.Thread(target=client_to_server, name="idamap-c2s", daemon=True).start()
 
-    out = sys.stdout.buffer
     try:
         while True:
             line = child.stdout.readline()
             if not line:
                 break
-            out.write(line)
-            out.flush()
+            msg = None
+            if obs.augment_ids:
+                try:
+                    msg = _parse(line)
+                    changed = obs.augment(session, msg)
+                    if changed is not None:
+                        line = json.dumps(changed).encode() + b"\n"
+                except Exception:  # noqa: BLE001
+                    _log_error("augment")
+            emit(line)
             try:
-                msg = _parse(line)
+                msg = msg if msg is not None else _parse(line)
                 if msg is not None:
                     obs.server_message(session, msg)
             except Exception:  # noqa: BLE001
@@ -285,6 +414,19 @@ def run_stdio(cmd: list[str], harness: str | None = None) -> int:
     obs.abandon(session, f"ida-mcp exited (code {rc}) before responding")
     rec.close()
     return rc
+
+
+def exit_now(rc: int) -> None:
+    """Exit without interpreter finalisation.
+
+    The client->server thread may still be blocked reading stdin (the client
+    keeps it open after the server died); normal shutdown would then abort with
+    "could not acquire lock for stdin". Everything that matters is flushed."""
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    finally:
+        os._exit(rc)
 
 
 # --------------------------------------------------------------------------
@@ -310,13 +452,14 @@ class _SSE:
                 yield data
 
 
-def make_http_proxy(listen: str, upstream: str, harness: str | None = None) -> ThreadingHTTPServer:
+def make_http_proxy(listen: str, upstream: str, harness: str | None = None,
+                    virtual_tools: bool = False) -> ThreadingHTTPServer:
     up = urlsplit(upstream)
     if up.scheme not in ("http", "https"):
         raise SystemExit(f"--upstream must be an http(s) URL, got {upstream!r}")
     base = up.path.rstrip("/")
     rec = Recorder("proxy-http")
-    obs = Observer(rec, harness)
+    obs = Observer(rec, harness, virtual_tools)
     anon = f"http-{uuid.uuid4().hex[:8]}"   # stateless mode: no Mcp-Session-Id
 
     class Handler(BaseHTTPRequestHandler):
@@ -349,9 +492,20 @@ def make_http_proxy(listen: str, upstream: str, harness: str | None = None) -> T
                     for m in msg if isinstance(msg, list) else [msg]:
                         if isinstance(m, dict) and m.get("method") == "initialize":
                             init_info = harness_name((m.get("params") or {}).get("clientInfo"))
+                    reply = obs.intercept(session, msg) if obs.virtual else None
+                    if reply is not None:
+                        data = json.dumps(reply).encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
                     obs.client_message(session, msg)
                 except Exception:  # noqa: BLE001
                     _log_error("http client message")
+            augment = bool(obs.augment_ids) and isinstance(msg, dict) and \
+                (session, json.dumps(msg.get("id"))) in obs.augment_ids
 
             headers = {k: v for k, v in self.headers.items() if k.lower() not in _HOP}
             headers["Host"] = up.netloc
@@ -376,7 +530,14 @@ def make_http_proxy(listen: str, upstream: str, harness: str | None = None) -> T
                     self.send_header(k, v)
             observe_session = session
             try:
-                if "text/event-stream" in ctype or resp.getheader("Content-Length") is None:
+                if augment:  # small response we must rewrite: buffer it
+                    data = resp.read()
+                    data = _augment_body(obs, session, data, "text/event-stream" in ctype)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    self.wfile.flush()
+                elif "text/event-stream" in ctype or resp.getheader("Content-Length") is None:
                     self.send_header("Transfer-Encoding", "chunked")
                     self.end_headers()
                     sse = _SSE() if "text/event-stream" in ctype else None
@@ -427,8 +588,27 @@ def make_http_proxy(listen: str, upstream: str, harness: str | None = None) -> T
     return httpd
 
 
-def run_http(listen: str, upstream: str, harness: str | None = None) -> int:
-    httpd = make_http_proxy(listen, upstream, harness)
+def _augment_body(obs: Observer, session: str, data: bytes, sse: bool) -> bytes:
+    try:
+        if not sse:
+            changed = obs.augment(session, _parse(data))
+            return json.dumps(changed).encode() if changed is not None else data
+        out = []
+        for event in data.replace(b"\r\n", b"\n").split(b"\n\n"):
+            lines = event.split(b"\n")
+            payload = b"\n".join(l[5:].lstrip() for l in lines if l.startswith(b"data:"))
+            changed = obs.augment(session, _parse(payload)) if payload else None
+            if changed is not None:
+                lines = [l for l in lines if not l.startswith(b"data:")] + [b"data: " + json.dumps(changed).encode()]
+            out.append(b"\n".join(lines))
+        return b"\n\n".join(out)
+    except Exception:  # noqa: BLE001
+        _log_error("http augment")
+        return data
+
+
+def run_http(listen: str, upstream: str, harness: str | None = None, virtual_tools: bool = False) -> int:
+    httpd = make_http_proxy(listen, upstream, harness, virtual_tools)
     sys.stderr.write(f"idamap proxy: http://{listen}/  ->  {upstream}\n")
     try:
         httpd.serve_forever()

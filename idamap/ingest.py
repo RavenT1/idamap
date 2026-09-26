@@ -236,6 +236,15 @@ def import_export(conn, path: str, db_id: int | None = None) -> dict:
     try:
         upsert_functions(conn, db_id, [
             {"start": int(f[0]), "size": max(int(f[1]) - int(f[0]), 1), "name": f[2]} for f in funcs], ts)
+        # v2 export rows: [start, end, name, demangled, is_lib]
+        conn.executemany("UPDATE functions SET demangled=?, is_lib=? WHERE db_id=? AND start_i=?",
+                         [(f[3], f[4], db_id, S.to_i(int(f[0]))) for f in funcs if len(f) >= 5])
+        refs = data.get("refs") or {}
+        if refs:
+            conn.execute("DELETE FROM func_refs WHERE db_id=?", (db_id,))
+            conn.executemany(
+                "INSERT OR IGNORE INTO func_refs(db_id, func_i, kind, value) VALUES (?,?,?,?)",
+                [(db_id, S.to_i(int(f)), kind, value) for f, items in refs.items() for kind, value in items])
         _store_segments(conn, db_id, [
             {"name": s.get("name"), "start": int(s["start"]), "end": int(s["end"]),
              "perms": s.get("perms"), "type": s.get("type")} for s in data.get("segments") or []])
@@ -250,7 +259,8 @@ def import_export(conn, path: str, db_id: int | None = None) -> dict:
     except Exception:
         conn.execute("ROLLBACK")
         raise
-    return {"db_id": db_id, "functions": len(funcs), "edges": len(data.get("edges") or [])}
+    return {"db_id": db_id, "functions": len(funcs), "edges": len(data.get("edges") or []),
+            "refs": sum(len(v) for v in (data.get("refs") or {}).values())}
 
 
 def _store_segments(conn, db_id: int, segs: list[dict]) -> None:

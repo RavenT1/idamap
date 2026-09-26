@@ -115,19 +115,26 @@ def changed_calls(conn, since: float) -> list[tuple[float, dict]]:
 
 def functions(conn, db_id: int, since: float | None = None) -> dict:
     sql = ("SELECT start_i, name, size, flags, touch_count, last_touched, first_touched, human_status, "
-           "orig_name, note IS NOT NULL AND note != '' AS has_note FROM functions WHERE db_id=?")
+           "orig_name, note IS NOT NULL AND note != '' AS has_note, demangled, "
+           "(SELECT summary || char(31) || status FROM annotations a WHERE a.db_id=functions.db_id "
+           " AND a.func_i=functions.start_i AND a.status != 'rejected' ORDER BY a.id DESC LIMIT 1) AS ann "
+           "FROM functions WHERE db_id=?")
     args: list = [db_id]
     if since:
         sql += " AND updated_at>?"
         args.append(since)
     sql += " ORDER BY start_i"
     rows = conn.execute(sql, args).fetchall()
-    # [start, name, size, flags, touches, last_touched, first_touched, human, orig_name, has_note]
-    return {"now": time.time(), "functions": [
-        [S.hexa(S.from_i(r["start_i"])), _fname(r), r["size"], r["flags"], r["touch_count"],
-         r["last_touched"], r["first_touched"], r["human_status"],
-         r["orig_name"] if r["orig_name"] and r["orig_name"] != r["name"] else None, bool(r["has_note"])]
-        for r in rows]}
+    # [start, name, size, flags, touches, last_touched, first_touched, human, orig_name, has_note,
+    #  demangled, explanation summary, explanation status]
+    out = []
+    for r in rows:
+        summ, st = (r["ann"].split("\x1f", 1) + [None])[:2] if r["ann"] else (None, None)
+        out.append([S.hexa(S.from_i(r["start_i"])), _fname(r), r["size"], r["flags"], r["touch_count"],
+                    r["last_touched"], r["first_touched"], r["human_status"],
+                    r["orig_name"] if r["orig_name"] and r["orig_name"] != r["name"] else None, bool(r["has_note"]),
+                    r["demangled"], summ, st])
+    return {"now": time.time(), "functions": out}
 
 
 def function_detail(conn, db_id: int, start: int) -> dict | None:
@@ -162,7 +169,15 @@ def function_detail(conn, db_id: int, start: int) -> dict | None:
         decomp = {"call_id": last_decomp["id"], "text": out, "ts": last_decomp["ended_at"]}
     strings = [r["detail"] for r in conn.execute(
         "SELECT DISTINCT detail FROM touches WHERE db_id=? AND func_i=? AND kind='string_ref' LIMIT 50", (db_id, si))]
+    refs: dict[str, list] = {}
+    for r in conn.execute("SELECT kind, value FROM func_refs WHERE db_id=? AND func_i=? ORDER BY kind, value",
+                          (db_id, si)):
+        refs.setdefault(r["kind"], []).append(r["value"])
+    anns = [dict(a) | {"tags": json.loads(a["tags"] or "[]")} for a in conn.execute(
+        "SELECT id, source, summary, name_suggestion, tags, framework, confidence, evidence, status, harness, "
+        "created_at, reviewed_at, call_id FROM annotations WHERE db_id=? AND func_i=? ORDER BY id DESC", (db_id, si))]
     return {
+        "demangled": f["demangled"], "is_lib": bool(f["is_lib"]), "references": refs, "explanations": anns,
         "start": S.hexa(start), "name": _fname(f), "orig_name": f["orig_name"], "size": f["size"],
         "flags": f["flags"], "flag_names": S.flag_list(f["flags"]), "stage": S.stage_of(f["flags"]),
         "touch_count": f["touch_count"], "first_touched": f["first_touched"], "last_touched": f["last_touched"],
@@ -283,6 +298,16 @@ def summary(conn, db_id: int) -> dict:
            WHERE c.db_id=? AND c.prompt_id IS NOT NULL GROUP BY c.prompt_id ORDER BY ts DESC LIMIT 50""", (db_id,))]
     segments = [{"name": r["name"], "start": r["start"], "end": r["end"], "perms": r["perms"], "type": r["type"]}
                 for r in conn.execute("SELECT * FROM segments WHERE db_id=? ORDER BY start_i", (db_id,))]
+    explanations = [dict(r) | {"func": S.hexa(S.from_i(r["func_i"]))} for r in conn.execute(
+        """SELECT a.id, a.func_i, a.summary, a.name_suggestion, a.status, a.confidence, a.harness, a.created_at,
+                  f.name, f.start_i FROM annotations a LEFT JOIN functions f ON f.db_id=a.db_id AND f.start_i=a.func_i
+           WHERE a.db_id=? ORDER BY a.id DESC LIMIT 20""", (db_id,))]
+    for e in explanations:
+        e["name"] = e["name"] or e["func"]
+        e.pop("func_i", None)
+        e.pop("start_i", None)
+    ann_counts = {r[0]: r[1] for r in conn.execute(
+        "SELECT status, count(*) FROM annotations WHERE db_id=? GROUP BY status", (db_id,))}
     sessions = conn.execute("SELECT count(DISTINCT session_id) FROM calls WHERE db_id=?", (db_id,)).fetchone()[0]
     session_list = [dict(r) for r in conn.execute(
         """SELECT s.id, s.harness, s.source, min(c.started_at) AS ts, max(c.started_at) AS last,
@@ -292,4 +317,5 @@ def summary(conn, db_id: int) -> dict:
     return {"db": d, "stages": stages, "human": human, "by_tool": by_tool, "activity": activity,
             "focus": focus, "renames": renames, "comments": comments, "prompts": prompts,
             "segments": segments, "sessions": sessions, "session_list": session_list,
+            "explanations": explanations, "explanation_counts": ann_counts,
             "edges": conn.execute("SELECT count(*) FROM edges WHERE db_id=?", (db_id,)).fetchone()[0]}
