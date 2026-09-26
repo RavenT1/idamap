@@ -128,6 +128,7 @@ async function loadDbs() {
   fill(sel, ...state.dbs.map((d) => h("option", { value: d.id }, `${d.name}`)));
   if (cur != null) sel.value = cur;
   sel.hidden = !state.dbs.length;
+  $("#exportBtn").parentElement.hidden = !state.dbs.length;  // nothing to export yet
 }
 
 async function selectDb(id) {
