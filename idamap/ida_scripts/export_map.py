@@ -65,9 +65,11 @@ def _seg(ea):
     return ida_segment.get_segm_name(s) if s else ""
 
 
-def _demangle(name):
+def _demangle(name, keep_module=False):
+    """Readable Swift / C++ name. Imports keep the long form: the module tells which SDK it comes from."""
     try:
-        d = ida_name.demangle_name(name, ida_name.MNG_SHORT_FORM) or ida_name.demangle_name(name, 0)
+        d = None if keep_module else ida_name.demangle_name(name, ida_name.MNG_SHORT_FORM)
+        d = d or ida_name.demangle_name(name, 0)
     except Exception:
         d = None
     return d if d and d != name else None
@@ -116,7 +118,7 @@ def collect_refs(deadline):
 
     def on_import(ea, name, _ord):
         if name and time.time() <= deadline:
-            label = _demangle(name) or name  # Swift / C++ imports are unreadable mangled
+            label = _demangle(name, keep_module=True) or name  # Swift / C++ imports are unreadable mangled
             for f in _funcs_referencing(ea):
                 add(f, "import", label)
         return True
