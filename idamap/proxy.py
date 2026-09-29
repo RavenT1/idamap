@@ -35,6 +35,7 @@ from . import store as S
 _HARNESS_HINTS = [
     ("claude-code", "claude-code"), ("claude-ai", "claude-desktop"), ("claude", "claude"),
     ("codex", "codex"), ("cursor", "cursor"), ("windsurf", "windsurf"), ("gemini", "gemini-cli"),
+    ("omp-coding-agent", "omp"),
     ("visual studio code", "vscode"), ("vscode", "vscode"), ("copilot", "vscode"), ("zed", "zed"),
     ("cline", "cline"), ("roo", "roo-code"), ("continue", "continue"), ("goose", "goose"),
     ("opencode", "opencode"), ("amp", "amp"), ("crush", "crush"), ("qwen", "qwen-code"),

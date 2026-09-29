@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from idamap import ingest, store
+from idamap import proxy
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -77,6 +78,29 @@ def messages_2026(client="claude-code"):
     return [{"jsonrpc": "2.0", "id": i, "method": "tools/call",
              "params": {"name": name, "arguments": args, "_meta": {**meta, "claudecode/toolUseId": f"toolu_{i}"}}}
             for i, (name, args) in enumerate(CALLS, 1)]
+
+
+class HarnessNameTests(unittest.TestCase):
+    """clientInfo.name -> short harness label, including real strings observed from live clients."""
+
+    CASES = [
+        ("claude-code", "claude-code"),  # real clientInfo.name observed from Claude Code CLI 2.1.x
+        ("claude-ai", "claude-desktop"),
+        ("Cursor", "cursor"),
+        ("codex", "codex"),
+        ("codex-cli", "codex"),
+        ("omp-coding-agent", "omp"),  # exact clientInfo.name sent by omp (can1357/oh-my-pi)
+        ("gemini-cli-mcp-client", "gemini-cli"),
+        ("Visual Studio Code", "vscode"),
+        ("", "mcp-client"),
+        (None, "mcp-client"),
+        ("SomeBrandNewTool", "somebrandnewtool"),  # unknown client: lowercased passthrough, not a crash
+    ]
+
+    def test_known_and_unknown_clients(self):
+        for name, expected in self.CASES:
+            with self.subTest(name=name):
+                self.assertEqual(proxy.harness_name({"name": name} if name is not None else None), expected)
 
 
 class ProxyBase(unittest.TestCase):

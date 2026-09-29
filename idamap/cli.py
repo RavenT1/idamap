@@ -226,6 +226,7 @@ def cmd_mcp_config(a) -> int:
         "claude-desktop": ("~/Library/Application Support/Claude/claude_desktop_config.json",
                            json.dumps({"mcpServers": {"ida": std}}, indent=2)),
         "windsurf": ("~/.codeium/windsurf/mcp_config.json", json.dumps({"mcpServers": {"ida": std}}, indent=2)),
+        "omp": ("~/.omp/agent/mcp.json  (or set PI_CODING_AGENT_DIR)", json.dumps({"mcpServers": {"ida": std}}, indent=2)),
         "gemini": ("~/.gemini/settings.json", json.dumps({"mcpServers": {"ida": std}}, indent=2)),
         "vscode": (".vscode/mcp.json", json.dumps({"servers": {"ida": {"type": "stdio", **std}}}, indent=2)),
         "codex": ("~/.codex/config.toml",
@@ -325,7 +326,7 @@ def main(argv=None) -> int:
 
     s = sub.add_parser("mcp-config", help="print MCP client config snippets that route ida-mcp through idamap")
     s.add_argument("--client", default="all",
-                   choices=["all", "claude-code", "cursor", "claude-desktop", "windsurf", "gemini", "vscode", "codex", "http"])
+                   choices=["all", "claude-code", "cursor", "claude-desktop", "windsurf", "omp", "gemini", "vscode", "codex", "http"])
     s.set_defaults(fn=cmd_mcp_config)
 
     s = sub.add_parser("hook", help="hook entry point (reads a Claude Code hook event on stdin)")
