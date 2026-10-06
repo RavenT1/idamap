@@ -42,7 +42,7 @@ CATEGORIES: dict[str, list[str]] = {
     "edit": ["set_comments", "rename", "patch", "patch_asm", "lumina_apply",
              "lumina_lookup", "list_patches"],
     "script": ["run_script"],
-    "idamap": ["idamap_annotate", "idamap_lookup"],
+    "idamap": ["idamap_annotate", "idamap_lookup", "idamap_search", "idamap_status"],
 }
 TOOL_CATEGORY = {t: c for c, ts in CATEGORIES.items() for t in ts}
 
@@ -318,6 +318,8 @@ def describe_target(tool: str, inp: dict) -> str:
         extra = str(inp.get("query") or inp.get("category") or "")
     elif tool == "run_script":
         extra = str(inp.get("file") or (inp.get("code") or "").strip().splitlines()[0:1])[:80]
+    elif tool == "idamap_search":
+        extra = "“%s”%s" % (str(inp.get("query") or "")[:60], " (unexplored)" if inp.get("unexplored_only") else "")
     elif tool == "idamap_annotate":
         extra = "“%s”" % str(inp.get("name_suggestion") or inp.get("summary") or "")[:60]
     elif tool in ("declare_type", "apply_types"):
@@ -502,7 +504,8 @@ def extract(tool: str, inp: dict, resp_text: str, ok: bool = True) -> Facts:
                     f.stub_names[t.addr] = n
     elif tool == "run_script":
         stdout = out.get("stdout", "") if isinstance(out, dict) else resp_text
-        m = re.search(re.escape(EXPORT_MARKER) + r"(\S+)", stdout or "")
+        m = re.search(re.escape(EXPORT_MARKER) + r"(.+?) functions=\d+", stdout or "") or \
+            re.search(re.escape(EXPORT_MARKER) + r"(\S+)", stdout or "")
         if m:
             f.export_file = m.group(1)
     elif tool in ("find_insns", "find_insn_operands", "find_bytes", "search", "find_string"):

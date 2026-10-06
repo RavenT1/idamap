@@ -4,19 +4,24 @@
   Stored as an unconfirmed hypothesis the analyst can confirm or reject.
 * ``idamap_lookup``   — the model reads what is already known before digging in,
   so knowledge carries over between sessions and harnesses.
+* ``idamap_search``   — find functions by name, string, import, class, selector or
+  earlier explanation, optionally only those nobody has analyzed yet.
+* ``idamap_status``   — where the research stands and where to look next.
 """
 
 from __future__ import annotations
 
 import json
 
-from . import ingest
+from . import bundle, ingest, navigate
 from . import parse as P
 from . import store as S
 
 ANNOTATE = "idamap_annotate"
 LOOKUP = "idamap_lookup"
-NAMES = {ANNOTATE, LOOKUP}
+SEARCH = "idamap_search"
+STATUS = "idamap_status"
+NAMES = {ANNOTATE, LOOKUP, SEARCH, STATUS}
 CONFIDENCE = ("low", "medium", "high")
 STATUSES = ("hypothesis", "confirmed", "rejected")
 
@@ -65,31 +70,60 @@ TOOLS = [
             "required": ["address"],
         },
     },
+    {
+        "name": SEARCH,
+        "title": "Search the analyzed binary (idamap)",
+        "description": (
+            "Find functions by what they are called, which string / imported symbol / Objective-C class or "
+            "selector they reference, or what earlier explanations say, instead of guessing names with "
+            "list_functions filters or probing strings one by one. Works on demangled names (Swift / C++) and "
+            "combines words with AND (\"keychain token\"). Set unexplored_only=true to list only functions nobody "
+            "has disassembled or decompiled yet: that is the answer to 'what should I look at next'. Results show "
+            "each function's coverage stage, any earlier explanation, and which bundled framework of the app an "
+            "imported symbol lives in. Cheap: use it before list_functions / find_string guesswork."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "Words to look for, e.g. \"SecItemCopyMatching\", \"bearer token\", \"jailbreak\""},
+                "kind": {"type": "string", "enum": list(navigate.SEARCH_KINDS),
+                         "description": "Where to look: any (default), name, string, import, class, selector, explanation"},
+                "unexplored_only": {"type": "boolean",
+                                    "description": "Only functions never disassembled / decompiled / annotated"},
+                "limit": {"type": "integer", "description": "Max results, default 20, max 50"},
+                "database_id": {"type": "string", "description": "ida-mcp workspace database_id, only in --workspace mode"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": STATUS,
+        "title": "Research status of the current binary (idamap)",
+        "description": (
+            "Overview of the work done on the current binary: coverage by stage, what was inspected last, the "
+            "unanalyzed functions most called from already-analyzed code (where to look next), explanations "
+            "awaiting the analyst's review, and the other binaries of the same app (frameworks) with whether "
+            "they were analyzed. Call it at the start of a session and whenever you wonder where to go next."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "database_id": {"type": "string", "description": "ida-mcp workspace database_id, only in --workspace mode"},
+            },
+        },
+    },
 ]
 
 INSTRUCTIONS = (
-    "\n\nidamap: this session is recorded for the analyst. Before analyzing a function, call idamap_lookup "
-    "with its address: earlier sessions and the analyst may already have explained, confirmed or rejected it "
-    "(IDA itself does not know this). After you understand a function, call idamap_annotate with a short "
-    "summary, a suggested name and the evidence.")
+    "\n\nidamap: this session is recorded for the analyst. Start with idamap_status to see what is already "
+    "covered. To find functions use idamap_search (names, strings, imports, selectors; unexplored_only=true "
+    "shows what nobody analyzed yet) instead of guessing list_functions filters. Before analyzing a function "
+    "call idamap_lookup with its address: earlier sessions and the analyst may already have explained, "
+    "confirmed or rejected it (IDA itself does not know this). After you understand a function, call "
+    "idamap_annotate with a short summary, a suggested name and the evidence.")
 
 
-def _db_for(conn, session_id: str | None, args: dict) -> int | None:
-    ws = args.get("database_id")
-    if ws:
-        r = conn.execute("SELECT db_id FROM workspace_ids WHERE ws_id=?", (str(ws),)).fetchone()
-        if r:
-            return r["db_id"]
-    if session_id:
-        r = conn.execute("SELECT db_id FROM sessions WHERE id=?", (session_id,)).fetchone()
-        if r and r["db_id"]:
-            return r["db_id"]
-    r = conn.execute("SELECT id FROM databases ORDER BY last_seen DESC LIMIT 1").fetchone()
-    return r["id"] if r else None
-
-
-def _fname(row) -> str:
-    return row["name"] or "sub_%X" % S.from_i(row["start_i"])
+_db_for = navigate.db_for
+_fname = navigate.fname
 
 
 def validate_annotation(args: dict) -> str | None:
@@ -142,7 +176,8 @@ def lookup(conn, session_id: str | None, args: dict) -> str:
     addrs = [P.parse_addr(a) for a in (raw if isinstance(raw, list) else [raw])][:20]
     db = _db_for(conn, session_id, args)
     if db is None:
-        return json.dumps({"error": "idamap has no database recorded yet"})
+        return json.dumps({"error": navigate.NO_DB})
+    idx = navigate.framework_index(conn, db)
     out = []
     for a in addrs:
         if a is None:
@@ -179,20 +214,41 @@ def lookup(conn, session_id: str | None, args: dict) -> str:
                 bucket.append(r["value"])
         if refs:
             item["references"] = refs
+        imports = [r["value"] for r in conn.execute(
+            "SELECT value FROM func_refs WHERE db_id=? AND func_i=? AND kind='import'", (db, fi))]
+        item.update(navigate.lookup_hints(conn, db, idx, f, imports))
 
         def names(sql):
-            return [_fname(r) for r in conn.execute(sql, (db, fi))]
+            return [navigate.labeled(r) for r in conn.execute(sql, (db, fi))]
 
-        callers = names("SELECT f.start_i, f.name FROM edges e JOIN functions f ON f.db_id=e.db_id AND f.start_i=e.src_i "
-                        "WHERE e.db_id=? AND e.dst_i=? LIMIT 15")
-        callees = names("SELECT f.start_i, f.name FROM edges e JOIN functions f ON f.db_id=e.db_id AND f.start_i=e.dst_i "
-                        "WHERE e.db_id=? AND e.src_i=? LIMIT 15")
+        callers = names("SELECT f.start_i, f.name, f.demangled FROM edges e JOIN functions f "
+                        "ON f.db_id=e.db_id AND f.start_i=e.src_i WHERE e.db_id=? AND e.dst_i=? LIMIT 15")
+        callees = names("SELECT f.start_i, f.name, f.demangled FROM edges e JOIN functions f "
+                        "ON f.db_id=e.db_id AND f.start_i=e.dst_i WHERE e.db_id=? AND e.src_i=? LIMIT 15")
         if callers:
             item["callers"] = callers
         if callees:
             item["callees"] = callees
         out.append(item)
     return json.dumps(out if len(out) != 1 else out[0], indent=1)
+
+
+def answer(conn, session_id: str | None, name: str, args: dict, extra: dict | None = None) -> tuple[str, bool]:
+    """Response for the read-only tools (lookup / search / status)."""
+    if name == LOOKUP:
+        return lookup(conn, session_id, args), True
+    if name == SEARCH:
+        text = navigate.search(conn, session_id, args)
+    else:
+        text = navigate.status(conn, session_id, args)
+    try:
+        data = json.loads(text)
+        ok = "error" not in data  # failures are {"error": ...}; results never carry that key
+        if extra and ok and isinstance(data, dict):
+            text = json.dumps({**extra, **data}, indent=1)  # extra facts first: the model reads the top of the answer
+    except ValueError:
+        ok = True
+    return text, ok
 
 
 def set_status(conn, db_id: int, ann_id: int, status: str) -> bool:

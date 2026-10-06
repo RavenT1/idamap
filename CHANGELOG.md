@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0
+
+- **Navigate the binary (opt-in, with the idamap tools)**: `idamap_search` (coverage-aware search by name, string,
+  import, selector, class or explanation; optional "unexplored only") and `idamap_status` (coverage by stage,
+  last inspected, where to look next). Both are answered by idamap.
+- **App-bundle awareness**: reads `Info.plist` / `Frameworks/`, maps imported symbols to the framework that
+  provides them and tells the model (and the UI: Overview card, function panel) which sibling binary holds the
+  implementation and whether it was analyzed.
+- **Automatic indexing** (`auto_map`, on by default, only with the tools on): the first search / status call makes
+  the proxy run idamap's read-only export script in ida-mcp. Disable with `idamap config auto_map off`.
+- `idamap_lookup` now shows callers / callees with addresses and framework hints for tiny import stubs.
+- The proxy can now make its own upstream calls over stdio and Streamable HTTP; replies to them never reach the client.
+- Export script marker is parsed even when the path contains spaces; `idamap_*` calls no longer create a
+  placeholder database before a binary is open.
+
 ## 0.2.0
 
 - **Any MCP client**: `idamap proxy` wraps ida-mcp over stdio (`idamap proxy -- ida-mcp`) or sits in front of

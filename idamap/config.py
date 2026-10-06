@@ -7,13 +7,17 @@ import json
 from . import store as S
 
 DEFAULTS = {
-    # the MCP proxy adds idamap_annotate / idamap_lookup tools so the LLM
-    # can record (and later re-read) what it understood about a function
+    # the MCP proxy adds idamap_annotate / idamap_lookup / idamap_search / idamap_status tools
+    # so the LLM can record and reuse what it understood, and navigate the binary
     "annotate_tools": False,
+    # with the tools on, the first idamap_search / idamap_status call indexes the whole binary by
+    # running idamap's own (read-only) export script inside ida-mcp, so the tools are useful at once
+    "auto_map": True,
 }
 
 DESCRIPTIONS = {
-    "annotate_tools": "Proxy exposes idamap_annotate / idamap_lookup so the LLM can record and reuse function explanations",
+    "auto_map": "With the idamap tools on, index the whole binary automatically on first use (runs idamap's read-only export script in ida-mcp)",
+    "annotate_tools": "Proxy exposes idamap_annotate / idamap_lookup / idamap_search / idamap_status to the LLM",
 }
 
 

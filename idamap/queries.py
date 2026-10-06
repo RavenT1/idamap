@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import time
 
+from . import bundle
 from . import parse as P
 from . import store as S
 
@@ -177,7 +178,15 @@ def function_detail(conn, db_id: int, start: int) -> dict | None:
     anns = [dict(a) | {"tags": json.loads(a["tags"] or "[]")} for a in conn.execute(
         "SELECT id, source, summary, name_suggestion, tags, framework, confidence, evidence, status, harness, "
         "created_at, reviewed_at, call_id FROM annotations WHERE db_id=? AND func_i=? ORDER BY id DESC", (db_id, si))]
+    frameworks = []
+    if refs.get("import"):
+        try:
+            idx = bundle.Index(bundle.bundle_info(conn, db_id))
+            frameworks = [idx.describe(m) for m in idx.modules_in(refs["import"])]
+        except Exception:  # noqa: BLE001 — a hint, never a failure
+            frameworks = []
     return {
+        "bundled_frameworks": frameworks,
         "demangled": f["demangled"], "is_lib": bool(f["is_lib"]), "references": refs, "explanations": anns,
         "start": S.hexa(start), "name": _fname(f), "orig_name": f["orig_name"], "size": f["size"],
         "flags": f["flags"], "flag_names": S.flag_list(f["flags"]), "stage": S.stage_of(f["flags"]),
@@ -266,6 +275,13 @@ def _chunks(xs, n):
         yield xs[i:i + n]
 
 
+def _bundle(conn, db_id: int):
+    try:
+        return bundle.bundle_info(conn, db_id)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def summary(conn, db_id: int) -> dict:
     d = next((x for x in databases(conn) if x["id"] == db_id), None)
     stages = {s: 0 for s in S.STAGES}
@@ -319,5 +335,5 @@ def summary(conn, db_id: int) -> dict:
     return {"db": d, "stages": stages, "human": human, "by_tool": by_tool, "activity": activity,
             "focus": focus, "renames": renames, "comments": comments, "prompts": prompts,
             "segments": segments, "sessions": sessions, "session_list": session_list,
-            "explanations": explanations, "explanation_counts": ann_counts,
+            "explanations": explanations, "explanation_counts": ann_counts, "bundle": _bundle(conn, db_id),
             "edges": conn.execute("SELECT count(*) FROM edges WHERE db_id=?", (db_id,)).fetchone()[0]}

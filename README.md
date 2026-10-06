@@ -119,13 +119,38 @@ File › Script file…, then `idamap import <json>`.
 idamap config annotate_tools on       # or per client: idamap proxy --annotate-tools -- ida-mcp
 ```
 
-The proxy then offers the model two extra tools, answered by idamap itself (never sent to ida-mcp, nothing is
-written to the IDA database):
+The proxy then offers the model four extra tools, answered by idamap itself (nothing is written to the IDA
+database):
 
 - **`idamap_annotate`** — after analyzing a function, the model records a summary, a suggested name, tags, the
   library / SDK / framework it belongs to, a confidence level and the evidence.
 - **`idamap_lookup`** — before digging in, the model reads what is already known: earlier explanations (and
   whether you confirmed or rejected them), your notes, renames, references, callers and callees.
+
+- **`idamap_search`** — coverage-aware search over the whole binary: by name, string, import, Objective-C
+  selector / class or earlier explanation, with the option to list only functions nobody has worked on yet.
+  Every hit carries its stage (unseen … annotated), size and the evidence that matched, so the model does not
+  guess `list_functions` filters or repeat work.
+- **`idamap_status`** — where the research stands: coverage by stage, what was inspected last, the most
+  promising functions nobody has looked at, and the app bundle (below).
+
+**App bundles.** In an `.app` / IPA the interesting code is often in a framework, not in the main binary. idamap
+reads `Info.plist` and `Frameworks/`, maps imported symbols to the framework that provides them (also through
+Swift module names) and tells the model which sibling binary holds the implementation and whether it was
+analyzed. The Overview shows the same as an "App bundle" card; the function panel lists "Calls into bundled
+frameworks".
+
+**Automatic indexing.** Search and status need the whole binary indexed. Models do not reliably run the export
+script themselves, so with the tools on the first call that needs it makes the proxy send one `run_script` of
+idamap's own read-only export script to ida-mcp (it only reads the IDA database and writes one JSON file under
+`~/.idamap/exports`; the call shows up as `idamap_map` in the timeline). A failure is not retried. If you do not
+want idamap to send any request to ida-mcp on its own:
+
+```sh
+idamap config auto_map off
+```
+
+The tools then ask the model to run the export script instead.
 
 Explanations are stored as **unconfirmed hypotheses**. You confirm or reject them in the function panel;
 confirmed ones are marked as such in the report, the IDA sync script and later lookups. Because the knowledge

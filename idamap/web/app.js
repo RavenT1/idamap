@@ -415,7 +415,8 @@ function renderOverview() {
     h("div", null,
       h("div", { class: "card" }, h("h3", null, "Focus trail — most recently inspected"), focus),
       h("div", { class: "card" }, h("h3", null, "Tasks (prompts)"), prompts),
-      h("div", { class: "card" }, h("h3", null, "Sessions & clients"), sessionsList(s.session_list || []))),
+      h("div", { class: "card" }, h("h3", null, "Sessions & clients"), sessionsList(s.session_list || [])),
+      s.bundle && s.bundle.members.length > 1 ? h("div", { class: "card" }, h("h3", null, `App bundle · ${s.bundle.app}`), bundleList(s.bundle)) : null),
     h("div", null,
       h("div", { class: "card" }, h("h3", null, "Activity (calls / minute)"), sparkline(s.activity)),
       h("div", { class: "card" }, h("h3", null, "Tool usage"), tools),
@@ -423,6 +424,18 @@ function renderOverview() {
       h("div", { class: "card" }, h("h3", null, "Recent comments"), comments),
       h("div", { class: "card" }, h("h3", null, "Recent LLM explanations"), explanationsList(s)))));
   fill(root, ...kids);
+}
+
+function bundleList(b) {
+  const analyzed = b.members.filter((m) => m.analyzed).length;
+  return [h("div", { class: "muted small", style: { marginBottom: "6px" } },
+    `${analyzed} of ${b.members.length} binaries analyzed. Code often lives in another binary of the app: the LLM is told which one.`),
+  h("ul", { class: "list" }, b.members.map((m) => h("li", { title: m.path },
+    h("span", { class: "dot", style: { background: m.current ? css("--accent") : m.analyzed ? stColor("decompiled") : stColor("unseen") } }),
+    h("span", { class: "grow mono small" }, m.name),
+    h("span", { class: "faint small" }, m.kind),
+    h("span", { class: "muted small" }, m.current ? "this binary" : m.analyzed ? (m.mapped ? "analyzed · mapped" : "analyzed") : "not analyzed yet"),
+    m.db_id && !m.current ? h("a", { class: "small", onclick: async () => { $("#followDb").checked = false; await selectDb(m.db_id); } }, "open") : null)))];
 }
 
 function explanationsList(s) {
@@ -1099,6 +1112,9 @@ async function refreshDrawer(reset) {
     d.comments.length ? [h("h4", null, "Comments set"), h("ul", { class: "list" }, d.comments.map((c) =>
       h("li", null, h("span", { class: "mono faint small" }, c.addr), h("span", { class: "grow" }, c.text))))] : null,
     d.strings.length ? [h("h4", null, "Strings seen in xref results"), h("ul", { class: "list" }, d.strings.map((s) => h("li", null, h("span", { class: "grow mono small" }, `"${s}"`))))] : null,
+    d.bundled_frameworks && d.bundled_frameworks.length ? [h("h4", null, "Calls into bundled frameworks"),
+      h("ul", { class: "list" }, d.bundled_frameworks.map((m) => h("li", { title: m.binary || "" },
+        h("span", { class: "grow mono small" }, m.name), h("span", { class: "muted small" }, m.status))))] : null,
     refs.length ? [h("h4", null, "References"), refs.map(([kind, vals]) => h("div", { class: "refs" },
       h("div", { class: "lbl" }, `${REF_LABEL[kind] || kind} (${vals.length})`),
       h("div", { class: "refchips" }, vals.map((v) => h("span", { class: `ref ref-${kind}`, title: v }, kind === "str" ? `"${v}"` : v)))))] :
@@ -1175,10 +1191,13 @@ function openSettings() {
   fill($("#drawerBody"),
     h("h2", null, "Settings"),
     h("div", { class: "muted small" }, "Optional features are off by default."),
-    cfgRow("annotate_tools", "LLM explanations (idamap_annotate / idamap_lookup)", [
-      h("p", { class: "muted" }, "The idamap proxy offers the LLM two extra tools. idamap_annotate records what the LLM understood about a function (summary, suggested name, tags, framework, confidence, evidence) as an unconfirmed hypothesis you confirm or reject here. idamap_lookup lets it reuse earlier knowledge, so functions are not re-reversed in every session. Nothing is written to the IDA database."),
+    cfgRow("annotate_tools", "idamap tools for the LLM (annotate / lookup / search / status)", [
+      h("p", { class: "muted" }, "The idamap proxy offers the LLM four extra tools. idamap_annotate records what it understood about a function (summary, suggested name, tags, framework, confidence, evidence) as an unconfirmed hypothesis you confirm or reject here. idamap_lookup lets it reuse earlier knowledge, so functions are not re-reversed in every session. idamap_search finds functions by name, string, import or selector and can list only the ones nobody analyzed yet. idamap_status tells it where the research stands and where to look next, including which other binary of the app holds the real code. Nothing is written to the IDA database."),
       h("p", { class: "muted" }, "Needs the proxy (any MCP client): restart your MCP client after changing this. Claude Code hooks alone cannot add tools."),
       h("pre", { class: "out" }, "idamap mcp-config        # client config snippets\nidamap proxy --annotate-tools -- ida-mcp   # force on for one client")]),
+    cfgRow("auto_map", "Index the whole binary automatically (needs the tools above)", [
+      h("p", { class: "muted" }, "idamap_search and idamap_status are only useful once the whole binary is indexed (all functions, call edges, strings, imports). Models do not reliably run the export script themselves, so the first call that needs it makes idamap run its own export script inside ida-mcp. The script only reads the IDA database; it writes one JSON file under ~/.idamap/exports. The call shows up in the timeline as idamap_map. Turn this off if you do not want idamap to send any request to ida-mcp on its own: the tools then ask the model to run the script instead."),
+      h("pre", { class: "out" }, "idamap config auto_map off")]),
     h("h4", null, "Data"),
     h("div", { class: "muted small mono" }, state.info.db_path));
 }

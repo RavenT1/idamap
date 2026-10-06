@@ -419,7 +419,8 @@ def on_pre(conn, payload: dict) -> int | None:
     tool = P.short_tool(payload["tool_name"])
     inp = payload.get("tool_input") or {}
     # open_idb/open_dsc decide their database in PostToolUse; don't invent one here
-    opening = tool in ("open_idb", "open_dsc")
+    # idamap's own tools may be called before any binary is open: they must not invent one either
+    opening = tool in ("open_idb", "open_dsc") or tool.startswith("idamap_")
     db_id = None if opening and not session.get("db_id") else _session_db(conn, session, inp)
     _ensure_prompt(conn, payload)
     intent = T.intent_for(payload.get("transcript_path"), payload.get("tool_use_id"))
@@ -450,7 +451,7 @@ def on_post(conn, payload: dict, ok: bool) -> None:
             return
     session = _touch_session(conn, payload)
     call_id, db_id = row["id"], row["db_id"]
-    if db_id is None and not (ok and tool in ("open_idb", "open_dsc")):
+    if db_id is None and not (ok and tool in ("open_idb", "open_dsc")) and not tool.startswith("idamap_"):
         db_id = _session_db(conn, session, inp)
     text = P.response_text(payload.get("tool_response")) if ok else ""
     error = None if ok else str(payload.get("error") or "error")[:4000]

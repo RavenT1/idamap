@@ -187,7 +187,7 @@ class AnnotateToolTests(ProxyBase):
         ]
         out = self.run_proxy(msgs, "--annotate-tools")
         names = [t["name"] for t in out[10]["result"]["tools"]]
-        self.assertEqual(names, ["decompile", "idamap_annotate", "idamap_lookup"])
+        self.assertEqual(names, ["decompile", "idamap_annotate", "idamap_lookup", "idamap_search", "idamap_status"])
         self.assertIn("idamap_lookup", out[0]["result"]["instructions"])
         self.assertIn("Recorded explanation for _main (0x100000514)", out[13]["result"]["content"][0]["text"])
         self.assertTrue(out[14]["result"]["isError"])

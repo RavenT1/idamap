@@ -139,6 +139,13 @@ def _text_of(result: dict) -> str:
     return "\n".join(parts)
 
 
+class _Waiter:
+    def __init__(self):
+        self.event = threading.Event()
+        self.text: str | None = None
+        self.error: str | None = None
+
+
 class Observer:
     """Pairs tools/call requests with their responses, per session."""
 
@@ -152,6 +159,10 @@ class Observer:
         self.lock = threading.Lock()
         self.cwd = os.getcwd()
         self._local = threading.local()
+        self.internal: dict[str, "_Waiter"] = {}   # requests idamap itself sent upstream (never shown to the client)
+        self._internal_n = 0
+        self.map_lock = threading.Lock()
+        self.map_failed: dict[int, str] = {}       # db id -> why automatic mapping did not work (do not retry)
 
     # ---- idamap's own tools (opt-in) -------------------------------------
     def _conn(self):
@@ -160,7 +171,90 @@ class Observer:
             c = self._local.conn = S.connect()
         return c
 
-    def intercept(self, session: str, msg) -> dict | None:
+    # ---- requests idamap sends to ida-mcp on its own ---------------------
+    def new_internal(self) -> tuple[str, "_Waiter"]:
+        with self.lock:
+            self._internal_n += 1
+            rid = f"idamap-int-{os.getpid()}-{self._internal_n}"
+            w = self.internal[rid] = _Waiter()
+        return rid, w
+
+    def deliver_internal(self, msg) -> bool:
+        """True when ``msg`` answers one of our own requests (it must then not reach the client)."""
+        if not isinstance(msg, dict):
+            return False
+        with self.lock:
+            w = self.internal.pop(msg.get("id"), None) if isinstance(msg.get("id"), str) else None
+        if w is None:
+            return False
+        if "error" in msg:
+            w.error = str((msg["error"] or {}).get("message") or "error")
+        else:
+            result = msg.get("result") or {}
+            w.text = _text_of(result)
+            if result.get("isError"):
+                w.error = w.text or "tool reported isError"
+        w.event.set()
+        return True
+
+    def _auto_map(self, session: str, args: dict, meta: dict, upstream) -> dict | None:
+        """Index the whole binary once, by running idamap's own export script inside ida-mcp.
+
+        The search / status tools are only useful with the full map; models do not reliably run the
+        export script themselves, so the first call that needs it does it. The script only reads the
+        IDA database. Returns {functions, edges, seconds} on success, {"failed": reason} on failure,
+        None when nothing was needed or attempted."""
+        import re as _re
+
+        from . import config, ingest, navigate
+
+        if upstream is None or not config.get("auto_map"):
+            return None
+        conn = self._conn()
+        db = navigate.db_for(conn, session, args)
+        if db is None:
+            return None
+
+        def mapped() -> bool:
+            r = conn.execute("SELECT map_imported_at FROM databases WHERE id=?", (db,)).fetchone()
+            return bool(r and r["map_imported_at"])
+
+        if mapped():
+            return None
+        with self.map_lock:
+            if mapped():  # another request finished it while we waited
+                return None
+            if db in self.map_failed:
+                return {"failed": self.map_failed[db]}
+            t0 = time.time()
+            call = {"file": str(navigate.EXPORT_SCRIPT), "timeout_secs": 600}
+            ws = conn.execute("SELECT ws_id FROM workspace_ids WHERE db_id=? ORDER BY rowid DESC LIMIT 1", (db,)).fetchone()
+            if ws:
+                call["database_id"] = ws[0]
+            fwd = {k: v for k, v in (meta or {}).items() if k.startswith("io.modelcontextprotocol/")}
+            payload = self._payload(session, f"map-{db}", "idamap_map", {"reason": "first idamap_search/idamap_status"})
+            self.rec.put("pre", payload)
+            text, why = None, None
+            try:
+                text = upstream("run_script", call, fwd, 600.0)
+            except Exception as e:  # noqa: BLE001
+                why = f"{type(e).__name__}: {e}"
+            m = _re.search(r"IDAMAP_EXPORT_FILE=(.+?) functions=\d+", text or "")
+            path = m.group(1) if m else None
+            if not path or not os.path.exists(path):
+                why = why or ("ida-mcp did not run the export script" + (f": {text[:160]}" if text else
+                              " (is it started with --read-only, or is no database open?)"))
+                self.map_failed[db] = why
+                payload.update(error=why, duration_ms=int((time.time() - t0) * 1000))
+                self.rec.put("error", payload)
+                return {"failed": why}
+            res = ingest.import_export(conn, path, db)
+            info = {"functions": res["functions"], "edges": res["edges"], "seconds": round(time.time() - t0, 1)}
+            payload.update(tool_response=[{"type": "text", "text": json.dumps(info)}], duration_ms=int(info["seconds"] * 1000))
+            self.rec.put("ok", payload)
+            return info
+
+    def intercept(self, session: str, msg, upstream=None) -> dict | None:
         """Answer tools/call for idamap_* locally; None = forward to ida-mcp."""
         if not self.virtual or not isinstance(msg, dict) or msg.get("method") != "tools/call" or "id" not in msg:
             return None
@@ -185,7 +279,15 @@ class Observer:
                 text = err or annotate.describe_annotate(conn, session, args)
                 ok, store = err is None, err is None
             else:
-                text, ok = annotate.lookup(conn, session, args), True
+                extra = None
+                if name in (annotate.SEARCH, annotate.STATUS):
+                    res = self._auto_map(session, args, meta, upstream)
+                    if res and "failed" in res:
+                        extra = {"auto_map": f"automatic mapping failed ({res['failed']}); run the export script yourself"}
+                    elif res:
+                        extra = {"auto_map": f"idamap indexed the binary just now ({res['functions']} functions, "
+                                             f"{res['edges']} call edges, {res['seconds']}s); the results below are complete"}
+                text, ok = annotate.answer(conn, session, name, args, extra)
         except Exception as e:  # noqa: BLE001
             _log_error(f"virtual tool {name}")
             text, ok = f"idamap error: {e}", False
@@ -354,6 +456,21 @@ def run_stdio(cmd: list[str], harness: str | None = None, virtual_tools: bool = 
         except (ValueError, OSError):
             pass
 
+    def upstream(name: str, args: dict, meta: dict, timeout: float = 180.0) -> str | None:
+        """Call an ida-mcp tool on the client's own session; the answer never reaches the client."""
+        rid, waiter = obs.new_internal()
+        req = {"jsonrpc": "2.0", "id": rid, "method": "tools/call", "params": {"name": name, "arguments": args}}
+        if meta:
+            req["params"]["_meta"] = meta
+        try:
+            child.stdin.write(json.dumps(req).encode() + b"\n")
+            child.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            obs.internal.pop(rid, None)
+            return None
+        # on timeout the entry stays registered so a late answer is swallowed instead of forwarded
+        return waiter.text if waiter.event.wait(timeout) and not waiter.error else None
+
     def client_to_server():
         src = sys.stdin.buffer
         try:
@@ -363,7 +480,7 @@ def run_stdio(cmd: list[str], harness: str | None = None, virtual_tools: bool = 
                     break
                 if obs.virtual and b"idamap_" in line and b"tools/call" in line:
                     try:
-                        reply = obs.intercept(session, _parse(line))
+                        reply = obs.intercept(session, _parse(line), upstream)
                     except Exception:  # noqa: BLE001
                         _log_error("intercept")
                         reply = None
@@ -394,6 +511,12 @@ def run_stdio(cmd: list[str], harness: str | None = None, virtual_tools: bool = 
             if not line:
                 break
             msg = None
+            if obs.internal and b"idamap-int-" in line:
+                try:
+                    if obs.deliver_internal(_parse(line)):
+                        continue
+                except Exception:  # noqa: BLE001
+                    _log_error("internal reply")
             if obs.augment_ids:
                 try:
                     msg = _parse(line)
@@ -481,6 +604,38 @@ def make_http_proxy(listen: str, upstream: str, harness: str | None = None,
         def do_OPTIONS(self):
             self._forward("OPTIONS")
 
+        def _upstream_for(self, session: str):
+            """Callable that runs an ida-mcp tool on this client's own MCP session."""
+            fwd = {k: v for k, v in self.headers.items() if k.lower() in ("mcp-session-id", "accept", "mcp-protocol-version")}
+
+            def call(name: str, args: dict, meta: dict, timeout: float = 180.0) -> str | None:
+                rid, waiter = obs.new_internal()
+                obs.internal.pop(rid, None)  # answered inline over HTTP, not through the stdio-style router
+                req = {"jsonrpc": "2.0", "id": rid, "method": "tools/call", "params": {"name": name, "arguments": args}}
+                if meta:
+                    req["params"]["_meta"] = meta
+                headers = {**fwd, "Content-Type": "application/json", "Host": up.netloc}
+                headers.setdefault("Accept", "application/json, text/event-stream")
+                conn_cls = http.client.HTTPSConnection if up.scheme == "https" else http.client.HTTPConnection
+                conn = conn_cls(up.hostname, up.port, timeout=timeout)
+                try:
+                    conn.request("POST", base + (self.path if self.path != "/" else "/"), body=json.dumps(req).encode(), headers=headers)
+                    resp = conn.getresponse()
+                    data = resp.read()
+                    ctype = (resp.getheader("Content-Type") or "").lower()
+                except OSError:
+                    return None
+                finally:
+                    conn.close()
+                payloads = ([d for d in _SSE().feed(data + b"\n\n")] if "text/event-stream" in ctype else [data])
+                for raw in payloads:
+                    m = _parse(raw)
+                    if isinstance(m, dict) and m.get("id") == rid and "result" in m:
+                        return None if (m["result"] or {}).get("isError") else _text_of(m["result"])
+                return None
+
+            return call
+
         def _forward(self, method: str):
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n) if n else None
@@ -493,7 +648,7 @@ def make_http_proxy(listen: str, upstream: str, harness: str | None = None,
                     for m in msg if isinstance(msg, list) else [msg]:
                         if isinstance(m, dict) and m.get("method") == "initialize":
                             init_info = harness_name((m.get("params") or {}).get("clientInfo"))
-                    reply = obs.intercept(session, msg) if obs.virtual else None
+                    reply = obs.intercept(session, msg, self._upstream_for(session)) if obs.virtual else None
                     if reply is not None:
                         data = json.dumps(reply).encode()
                         self.send_response(200)

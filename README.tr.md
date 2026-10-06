@@ -89,12 +89,36 @@ string/selector/class/import'lar içe aktarılır. Modele yalnızca tek bir öze
 idamap config annotate_tools on       # veya tek istemci için: idamap proxy --annotate-tools -- ida-mcp
 ```
 
-Proxy modele iki araç daha sunar (idamap'in kendisi yanıtlar, IDA veritabanına hiçbir şey yazılmaz):
+Proxy modele dört araç daha sunar (idamap'in kendisi yanıtlar, IDA veritabanına hiçbir şey yazılmaz):
 
 - **`idamap_annotate`** — model bir fonksiyonu analiz ettikten sonra özet, önerilen isim, etiketler,
   ait olduğu kütüphane/SDK/framework, güven seviyesi ve kanıtı kaydeder.
 - **`idamap_lookup`** — model işe başlamadan önce bilineni okur: önceki açıklamalar (senin onaylayıp
   reddettiğin), notların, rename'ler, referanslar, caller/callee'ler.
+
+- **`idamap_search`** — tüm binary üzerinde kapsama farkındalıklı arama: isim, string, import, Objective-C
+  selector/class veya önceki açıklamaya göre; istenirse yalnızca kimsenin üzerinde çalışmadığı fonksiyonlar.
+  Her sonuç aşamasını (unseen … annotated), boyutunu ve eşleşen kanıtı taşır; model `list_functions` filtresi
+  tahmin etmez, işi tekrarlamaz.
+- **`idamap_status`** — araştırmanın durumu: aşamaya göre kapsama, son bakılanlar, kimsenin bakmadığı en
+  umut verici fonksiyonlar ve uygulama paketi (aşağıda).
+
+**Uygulama paketleri.** Bir `.app` / IPA içinde ilginç kod çoğu zaman ana binary'de değil framework'tedir. idamap
+`Info.plist` ve `Frameworks/` dizinini okur, import edilen sembolleri onları sağlayan framework'e eşler (Swift
+modül isimleri dahil) ve modele hangi kardeş binary'de implementasyon olduğunu, analiz edilip edilmediğini söyler.
+Overview'da "App bundle" kartı, fonksiyon panelinde "Calls into bundled frameworks" bölümü görünür.
+
+**Otomatik indeksleme.** Search ve status için tüm binary'nin indekslenmesi gerekir. Modeller export script'ini
+güvenilir şekilde kendileri çalıştırmaz; bu yüzden araçlar açıkken ihtiyaç duyan ilk çağrıda proxy, ida-mcp'ye
+idamap'in kendi salt-okunur export script'ini tek bir `run_script` ile gönderir (IDA veritabanını yalnızca okur,
+`~/.idamap/exports` altına tek bir JSON yazar; zaman çizelgesinde `idamap_map` olarak görünür). Hata olursa tekrar
+denenmez. idamap'in ida-mcp'ye kendiliğinden istek göndermesini istemiyorsan:
+
+```sh
+idamap config auto_map off
+```
+
+Araçlar bu durumda modelden export script'ini çalıştırmasını ister.
 
 Açıklamalar **onaylanmamış hipotez** olarak saklanır; fonksiyon panelinde onaylar veya reddedersin. Bilgi idamap'te
 durduğu için oturumlar ve istemciler arasında taşınır. Ayarlar arayüzde de var (⚙); isteğe bağlı özellikler
