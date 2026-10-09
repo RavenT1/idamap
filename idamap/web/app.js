@@ -139,6 +139,7 @@ async function selectDb(id) {
   state.funcs.clear();
   state.calls.clear();
   state.prompts = {};
+  state.compliance = null;
   graphState.loadedFor = null;
   const [sum, fn, cl] = await Promise.all([
     api(`/api/db/${id}/summary`), api(`/api/db/${id}/functions`), api(`/api/calls?db=${id}&limit=400`),
@@ -379,6 +380,8 @@ function renderOverview() {
     h("div", { class: "legend", style: { marginTop: "8px" } }, STAGES.slice().reverse().map((st) =>
       h("span", null, h("i", { class: "sw", style: { background: stColor(st) } }), `${STAGE_LABEL[st]} `, h("b", { class: "mono" }, counts[st].toLocaleString()))))));
 
+  kids.push(h("div", { class: "card", id: "complianceCard", hidden: true }));  // filled by drawCompliance()
+
   const focus = h("ul", { class: "list" }, s.focus.length ? s.focus.map((f, i) => {
     const fr = state.funcs.get(f.start);
     return h("li", null,
@@ -424,6 +427,64 @@ function renderOverview() {
       h("div", { class: "card" }, h("h3", null, "Recent comments"), comments),
       h("div", { class: "card" }, h("h3", null, "Recent LLM explanations"), explanationsList(s)))));
   fill(root, ...kids);
+  drawCompliance();
+  loadCompliance();
+}
+
+// ------------------------------------------------------------------ guidance followed
+// How closely the LLM did what idamap's tools ask of it, counted from the recorded calls (see compliance.py).
+const loadCompliance = throttle(async () => {
+  if (state.db == null) return;
+  const db = state.db;
+  try {
+    const c = await api(`/api/db/${db}/compliance`);
+    if (db === state.db) { state.compliance = c; drawCompliance(); }
+  } catch { /* nothing else on the page depends on it */ }
+}, 4000);
+
+function drawCompliance() {
+  const card = $("#complianceCard");
+  const c = state.compliance;
+  if (!card) return;
+  if (!c || (!c.measured && !state.config?.annotate_tools)) { card.hidden = true; return; }  // feature unused
+  card.hidden = false;
+  const row = (label, unit, yes, of, tip, warn) => h("div", { class: "row", title: tip },
+    h("span", { class: "lbl" }, label, " ", h("span", { class: "faint small" }, unit)),
+    h("div", { class: "track" }, h("i", { style: { width: of ? `${(100 * yes) / of}%` : "0", minWidth: yes ? "3px" : "0", background: warn ? css("--warn") : css("--accent") } })),
+    h("span", { class: "n" }, of ? `${yes} / ${of}` : "–"));
+  const kids = [h("h3", null, "Guidance followed")];
+  if (!c.measured) {
+    kids.push(h("div", { class: "muted" }, "idamap's tools are on, but no recorded session had them yet. Restart your MCP client and start a new session; this fills in as the model works."));
+  } else {
+    const st = c.status, k = c.known, se = c.search;
+    kids.push(
+      h("div", { class: "muted small", style: { marginBottom: "8px" } },
+        `Counted from ${c.measured} session(s). Not a score: not every function needs an explanation. Useful for comparing setups.`),
+      h("div", { class: "bars comp" },
+        row("Started with idamap_status", "sessions", st.first, st.of, `The session called idamap_status before its first investigative call. ${st.late} called it later, ${st.never} never did.`),
+        row("Looked functions up before analyzing them", "functions", c.lookup.yes, c.lookup.of, "Functions the session decompiled or disassembled that it had passed to idamap_lookup earlier in the same session."),
+        row("Explained the functions it analyzed", "functions", c.explained.yes, c.explained.of, "Functions the session decompiled or disassembled and later passed to idamap_annotate."),
+        row("Used idamap_search, not a guessed list filter", "calls", se.idamap_search, se.idamap_search + se.guessed_filters, `idamap_search calls against list_functions calls that carried a filter (${se.guessed_filters}). Unfiltered listings are not counted.`),
+        row("Checked explained functions before re-analyzing", "functions", k.looked_up, k.of, `Functions that already had an explanation before the session began. ${k.blind} were analyzed again without a lookup.`, k.blind > 0)));
+    if (k.blind > 0) kids.push(h("div", { class: "small", style: { marginTop: "6px", color: css("--warn") } }, `${k.blind} function(s) with a known explanation were analyzed again without looking it up.`));
+    if (c.unmeasured) kids.push(h("div", { class: "faint small", style: { marginTop: "6px" } }, `${c.unmeasured} session(s) without idamap's tools are not counted.`));
+    if (c.inferred) kids.push(h("div", { class: "faint small", style: { marginTop: "4px" } }, `${c.inferred} session(s) were recorded before offers were tracked and count only because they used an idamap tool, so these numbers lean optimistic.`));
+    kids.push(h("div", { style: { marginTop: "8px" } },
+      h("a", { class: "small", onclick: () => { state.compOpen = !state.compOpen; drawCompliance(); } }, state.compOpen ? "Hide sessions ▴" : "Per session ▾")));
+    if (state.compOpen) kids.push(h("ul", { class: "list", style: { marginTop: "6px" } }, c.sessions.map((x) => h("li", {
+      class: "prompt-li", onclick: () => { showTab("timeline"); renderTimeline(); setTimeout(() => $(`[data-session="${CSS.escape(x.id)}"], [data-prompt]`)?.scrollIntoView({ block: "start" }), 50); },
+    },
+      harnessTag(x.harness || "unknown"),
+      h("span", { class: "grow muted small mono" }, x.id.replace(/^(stdio|http)-/, "").slice(0, 12),
+        x.inferred ? h("span", { class: "faint", style: { marginLeft: "8px" }, title: "Recorded before offers were tracked: counted only because it used an idamap tool" }, "legacy") : null),
+      h("span", { class: "small", title: "idamap_status before the first investigative call" }, `status ${x.status === "na" ? "–" : x.status}`),
+      h("span", { class: "mono muted small", title: "functions looked up before analysis" }, `lookup ${x.looked}/${x.analyzed}`),
+      h("span", { class: "mono muted small", title: "functions analyzed and then explained" }, `explained ${x.explained}/${x.analyzed}`),
+      h("span", { class: "mono muted small", title: "idamap_search calls / filtered list_functions calls" }, `search ${x.searches}/${x.guessed}`),
+      x.known ? h("span", { class: "mono small", style: { color: x.known - x.known_looked ? css("--warn") : "" }, title: "already explained before the session: looked up first / total" }, `known ${x.known_looked}/${x.known}`) : null,
+      h("span", { class: "faint small" }, ago(x.started_at))))));
+  }
+  fill(card, ...kids);
 }
 
 function bundleList(b) {

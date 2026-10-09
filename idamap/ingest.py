@@ -128,23 +128,41 @@ def file_sha256(path: str | None, limit: int = 2 * 1024 ** 3) -> str | None:
         return None
 
 
+def _offered(payload: dict) -> int | None:
+    """Only a proxy knows whether idamap's tools were offered to the client (1/0); a hook cannot (None)."""
+    v = payload.get("tools_offered")
+    return None if v is None else int(bool(v))
+
+
 def _touch_session(conn, payload: dict) -> dict:
     sid = payload.get("session_id") or "unknown"
     ts = S.now()
     row = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
     harness = payload.get("harness") or ("claude-code" if payload.get("hook_event_name") else None)
     source = payload.get("source") or ("hook" if payload.get("hook_event_name") else None)
+    offered = _offered(payload)
     if not row:
         conn.execute(
-            "INSERT INTO sessions(id, harness, source, cwd, transcript_path, started_at, last_seen) VALUES (?,?,?,?,?,?,?)",
-            (sid, harness, source, payload.get("cwd"), payload.get("transcript_path"), ts, ts))
+            "INSERT INTO sessions(id, harness, source, cwd, transcript_path, tools_offered, started_at, last_seen) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (sid, harness, source, payload.get("cwd"), payload.get("transcript_path"), offered, ts, ts))
         row = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
     else:
         conn.execute("UPDATE sessions SET last_seen=?, transcript_path=COALESCE(?, transcript_path), "
-                     "harness=COALESCE(?, harness), source=COALESCE(?, source) WHERE id=?",
-                     (ts, payload.get("transcript_path"), harness, source, sid))
+                     "harness=COALESCE(?, harness), source=COALESCE(?, source), "
+                     "tools_offered=CASE WHEN ? IS NULL THEN tools_offered ELSE MAX(COALESCE(tools_offered, 0), ?) END "
+                     "WHERE id=?",
+                     (ts, payload.get("transcript_path"), harness, source, offered, offered, sid))
         row = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
     return dict(row)
+
+
+def _note_offer(conn, call_id: int, payload: dict) -> None:
+    """A proxy call that duplicates a hook-recorded one: the hook's session is the one to tag."""
+    offered = _offered(payload)
+    if offered is not None:
+        conn.execute("UPDATE sessions SET tools_offered=MAX(COALESCE(tools_offered, 0), ?) "
+                     "WHERE id=(SELECT session_id FROM calls WHERE id=?)", (offered, call_id))
 
 
 def _session_db(conn, session: dict, inp: dict | None = None) -> int:
@@ -414,6 +432,7 @@ def on_pre(conn, payload: dict) -> int | None:
         if dup is not None:
             conn.execute("INSERT OR IGNORE INTO call_aliases(alias, call_id) VALUES (?,?)",
                          (payload.get("tool_use_id"), dup))
+            _note_offer(conn, dup, payload)
             return None
     session = _touch_session(conn, payload)
     tool = P.short_tool(payload["tool_name"])

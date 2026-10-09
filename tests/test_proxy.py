@@ -141,6 +141,8 @@ class StdioProxyTests(ProxyBase):
         self.assertEqual(proxied.returncode, 0, proxied.stderr)
         self.assertEqual(proxied.stdout, direct.stdout)  # byte-identical stream
         self.check_recorded("cursor", "proxy-stdio")
+        # without --annotate-tools the proxy says it did not offer them (0, not "unknown")
+        self.assertEqual([r[0] for r in self.db().execute("SELECT tools_offered FROM sessions")], [0])
 
     def test_mcp_2026_handshake_free(self):
         srv = Path(self.tmp.name) / "fake_server.py"
@@ -201,6 +203,8 @@ class AnnotateToolTests(ProxyBase):
         self.assertEqual(store.stage_of(f["flags"]), "annotated")
         tools = [r[0] for r in conn.execute("SELECT tool FROM calls ORDER BY id")]
         self.assertEqual(tools, ["open_idb", "list_functions", "idamap_annotate", "idamap_annotate"])
+        # the proxy tells the store that it offered idamap's tools to this session
+        self.assertEqual([r[0] for r in conn.execute("SELECT tools_offered FROM sessions")], [1])
 
         # a later session (another client) reads it back
         out = self.run_proxy(messages("Codex")[:2] + [

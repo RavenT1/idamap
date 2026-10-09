@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Guidance followed** (Overview card): counts from the recorded calls whether the model did what idamap's tools
+  ask: started with `idamap_status`, looked a function up before analyzing it, explained what it analyzed, searched
+  with `idamap_search` instead of a guessed `list_functions` filter, and how many already-explained functions it
+  re-analyzed without a lookup. Per-session breakdown included; API: `/api/db/<id>/compliance`.
+- The proxy records whether it offered idamap's tools to a session (`sessions.tools_offered`, schema v4), so
+  sessions where the tools were off are not counted against the model.
+
 ## 0.3.0
 
 - **Navigate the binary (opt-in, with the idamap tools)**: `idamap_search` (coverage-aware search by name, string,

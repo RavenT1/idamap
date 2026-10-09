@@ -85,6 +85,11 @@ Açıklamalar **onaylanmamış hipotez** olarak saklanır; fonksiyon panelinde o
 istemciler arasında taşınır. Modelin yazdığı notlar güvenilmeyen girdidir: kötü niyetli bir binary onları
 yönlendirmeye çalışabilir; bu yüzden sen inceleyene kadar onaylanmamış kalırlar.
 
+**Model bunları kullanıyor mu?** Overview'daki *Guidance followed* kartı, kayıtlı çağrılardan şunları sayar: oturum
+kaç kez `idamap_status` ile başladı, bir fonksiyonu analiz etmeden önce `idamap_lookup` yaptı mı, analiz ettiğini
+açıkladı mı, `idamap_search` kullandı mı ve zaten açıklanmış fonksiyonların kaçını aramadan yeniden analiz etti.
+Bir skor değil, bir sayımdır; yalnızca araçların sunulduğu oturumları kapsar.
+
 **Uygulama paketleri.** Bir `.app` / IPA içinde ilginç kod çoğu zaman bir framework'tedir. idamap `Info.plist` ve
 `Frameworks/` dizinini okur, import edilen sembolleri onları sağlayan framework'e eşler ve modele kodun hangi
 binary'de olduğunu, analiz edilip edilmediğini söyler.

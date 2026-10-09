@@ -203,6 +203,9 @@ main { flex: 1; overflow: auto; position: relative; }
 .bars .row .track { height: 10px; background: var(--panel2); border-radius: 3px; overflow: hidden; }
 .bars .row .track i { display: block; height: 100%; border-radius: 3px; }
 .bars .row .n { text-align: right; font-family: var(--mono); color: var(--muted); }
+.bars.comp { max-width: 900px; }
+.bars.comp .row { grid-template-columns: minmax(0, 400px) minmax(80px, 1fr) 72px; }
+.bars.comp .row .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .callout { border: 1px dashed var(--line2); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 14px; background: var(--panel); }
 .callout code { background: var(--panel2); padding: 2px 6px; border-radius: 4px; font-size: 12px; word-break: break-all; }
 .empty { color: var(--muted); padding: 40px; text-align: center; }

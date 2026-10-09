@@ -14,7 +14,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Coverage flags stored in functions.flags (bitwise OR of everything that
 # happened to the function).
@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     cwd TEXT,
     transcript_path TEXT,
     db_id INTEGER,                     -- database currently open in this session
+    tools_offered INTEGER,             -- 1: a proxy offered idamap's tools, 0: a proxy without them, NULL: unknown
     started_at REAL,
     last_seen REAL
 );
@@ -204,6 +205,7 @@ CREATE TABLE IF NOT EXISTS touches (
 );
 CREATE INDEX IF NOT EXISTS touches_func ON touches(db_id, func_i);
 CREATE INDEX IF NOT EXISTS touches_call ON touches(call_id);
+CREATE INDEX IF NOT EXISTS touches_target ON touches(db_id, role, kind);   -- "guidance followed" reads the few target rows
 
 CREATE TABLE IF NOT EXISTS edges (
     db_id INTEGER, src_i INTEGER, dst_i INTEGER, src TEXT, dst TEXT,
@@ -272,7 +274,7 @@ _initialized: set[str] = set()
 
 # columns added after schema v1 (CREATE TABLE IF NOT EXISTS won't add them to old files)
 _ADDED_COLUMNS = {
-    "sessions": [("harness", "TEXT"), ("source", "TEXT")],
+    "sessions": [("harness", "TEXT"), ("source", "TEXT"), ("tools_offered", "INTEGER")],
     "calls": [("harness", "TEXT")],
     "functions": [("demangled", "TEXT"), ("is_lib", "INTEGER")],
 }

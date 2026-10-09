@@ -329,7 +329,7 @@ class Observer:
     def _payload(self, session: str, key: str, name: str, args: dict, host_id: str | None = None) -> dict:
         p = {"session_id": session, "tool_use_id": f"{session}:{key}", "tool_name": f"mcp__ida__{name}",
              "tool_input": args, "harness": self.override or self.harness.get(session, "mcp-client"),
-             "source": self.rec.source, "cwd": self.cwd}
+             "source": self.rec.source, "cwd": self.cwd, "tools_offered": bool(self.virtual)}
         if host_id:
             p["host_tool_use_id"] = host_id  # e.g. Claude Code's toolu_… id, for exact hook dedupe
         return p

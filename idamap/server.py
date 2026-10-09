@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__, annotate, config
+from . import __version__, annotate, compliance, config
 from . import parse as P
 from . import queries as Q
 from . import report
@@ -128,11 +128,13 @@ class Handler(BaseHTTPRequestHandler):
                 db = int(qs["db"]) if qs.get("db") else None
                 return self._json(Q.calls(conn(), db, int(qs.get("before") or 0) or None,
                                           min(int(qs.get("limit") or 300), 2000)))
-            m = re.fullmatch(r"/api/db/(\d+)/(summary|functions|graph|report\.md|ida_sync\.py)", p)
+            m = re.fullmatch(r"/api/db/(\d+)/(summary|compliance|functions|graph|report\.md|ida_sync\.py)", p)
             if m:
                 db, what = int(m.group(1)), m.group(2)
                 if what == "summary":
                     return self._json(Q.summary(conn(), db))
+                if what == "compliance":
+                    return self._json(compliance.compute(conn(), db))
                 if what == "functions":
                     return self._json(Q.functions(conn(), db, float(qs["since"]) if qs.get("since") else None))
                 if what == "graph":

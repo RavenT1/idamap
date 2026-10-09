@@ -91,6 +91,11 @@ Explanations are stored as **unconfirmed hypotheses**; you confirm or reject the
 carry over between sessions and clients. Model-written notes are untrusted input: a malicious binary can try to
 steer them, which is why they stay unconfirmed until you review them.
 
+**Is the model using them?** The Overview's *Guidance followed* card counts, from the recorded calls, how often a
+session started with `idamap_status`, looked a function up before analyzing it, explained what it analyzed and
+searched with `idamap_search`, and how many already-explained functions it re-analyzed without a lookup. It is a
+count, not a score, and covers only sessions where the tools were offered.
+
 **App bundles.** In an `.app` / IPA the interesting code is often in a framework. idamap reads `Info.plist` and
 `Frameworks/`, maps imported symbols to the framework that provides them, and tells the model which binary holds
 the code and whether it was analyzed.
