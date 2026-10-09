@@ -35,11 +35,15 @@ Kapsama aşamaları: `seen` (bir sonuçta göründü) → `explored` (xrefs / ca
 
 ## Kurulum
 
-Python ≥ 3.10, bağımlılık yok (arayüzün graf kütüphanesi pakette; her şey internetsiz çalışır).
+**Ön koşul: ida-mcp.** idamap, ida-mcp'yi içermez ve kurmaz; yalnızca onun önünde durur. Önce
+[ida-mcp-rs](https://github.com/blacktop/ida-mcp-rs)'i kur ve tek başına çalıştığından emin ol; neye ihtiyaç duyduğu
+(IDA Pro vb.) onun README'sinde yazar.
+
+idamap'in kendisi Python ≥ 3.10 ister, başka bağımlılığı yoktur (arayüzün graf kütüphanesi pakette; her şey internetsiz çalışır).
 
 ```sh
-uv tool install git+<repo-adresi>      # veya: pipx install … / pip install …
-idamap serve --open                     # http://127.0.0.1:8777
+uv tool install git+https://github.com/RavenT1/idamap      # veya: pipx install git+https://github.com/RavenT1/idamap
+idamap serve --open                                         # http://127.0.0.1:8777
 ```
 
 Kaynaktan: `uv tool install -e .`

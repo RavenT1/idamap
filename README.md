@@ -42,11 +42,15 @@ Coverage stages: `seen` (appeared in a result) → `explored` (xrefs / callers /
 
 ## Install
 
-Python ≥ 3.10, no dependencies (the UI's graph library is vendored; everything works offline).
+**Prerequisite: ida-mcp.** idamap does not include or install ida-mcp, it only sits in front of it. Install
+[ida-mcp-rs](https://github.com/blacktop/ida-mcp-rs) first and make sure it works on its own; its README lists what it
+needs (IDA Pro, etc.).
+
+idamap itself needs Python ≥ 3.10 and no other dependencies (the UI's graph library is vendored; everything works offline).
 
 ```sh
-uv tool install git+<repository-url>      # or: pipx install … / pip install …
-idamap serve --open                        # http://127.0.0.1:8777
+uv tool install git+https://github.com/RavenT1/idamap      # or: pipx install git+https://github.com/RavenT1/idamap
+idamap serve --open                                         # http://127.0.0.1:8777
 ```
 
 From a checkout: `uv tool install -e .`
