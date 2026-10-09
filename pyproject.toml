@@ -9,7 +9,7 @@ description = "See what your LLM does in IDA: live coverage map, call graph and 
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "idamap contributors" }]
+authors = [{ name = "RavenT1" }]
 keywords = ["ida", "ida-pro", "reverse-engineering", "mcp", "llm", "claude", "hex-rays", "visualization"]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -17,13 +17,19 @@ classifiers = [
   "Intended Audience :: Developers",
   "Intended Audience :: Information Technology",
   "License :: OSI Approved :: MIT License",
-  "Operating System :: OS Independent",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Topic :: Security",
   "Topic :: Software Development :: Disassemblers",
 ]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/RavenT1/idamap"
+Source = "https://github.com/RavenT1/idamap"
+Issues = "https://github.com/RavenT1/idamap/issues"
 
 [project.scripts]
 idamap = "idamap.cli:main"

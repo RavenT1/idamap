@@ -4,8 +4,12 @@
 tool call your LLM makes and turns it into a live, browsable map of the reverse-engineering work: what was
 looked at, what is running right now, why, and what is still unexplored.
 
-Works with **any MCP client** — Claude Code, Cursor, Codex, Claude Desktop, VS Code / Copilot, Gemini CLI,
-Windsurf, Zed, Cline, … — through a transparent proxy, with no changes to ida-mcp or IDA.
+It sits in front of ida-mcp as a transparent proxy, so it works with MCP clients without changing ida-mcp or IDA
+(see [Compatibility](#compatibility) for what has actually been tested).
+
+> idamap is an independent companion for [**ida-mcp-rs**](https://github.com/blacktop/ida-mcp-rs) by
+> [blacktop](https://github.com/blacktop). It contains none of ida-mcp's code: it launches ida-mcp and relays its
+> MCP messages. It is not affiliated with or endorsed by blacktop or Hex-Rays. IDA Pro is a product of Hex-Rays.
 
 > Türkçe: [README.tr.md](README.tr.md)
 
@@ -194,6 +198,18 @@ Tested with a 115k-function iOS app (385k call edges): full-map export ≈ 23 s 
 - The database contains tool outputs (pseudocode, strings) from the binaries you analyze. Treat it like the
   IDA database itself.
 
+## Compatibility
+
+| | Status |
+|---|---|
+| macOS + ida-mcp-rs + **Claude Code**, **Codex CLI**, **omp** | tested end to end with real sessions |
+| Linux, Python 3.10 and 3.13 | unit tests pass (fake ida-mcp); not tested with real IDA |
+| Windows | not tested |
+| Other MCP clients (Cursor, Claude Desktop, VS Code, Gemini CLI, …) | expected to work (the proxy speaks standard MCP over stdio and Streamable HTTP), not verified |
+| Other IDA MCP servers (e.g. mrexodia/ida-pro-mcp, Hex-Rays' own) | not tested; tool names may differ |
+
+Reports and fixes for other setups are welcome.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -212,6 +228,11 @@ python -m unittest discover -s tests -t .
 
 Tests use real ida-mcp outputs, real Claude Code hook payloads, and fake stdio / Streamable-HTTP (SSE) MCP
 servers to check that the proxy is byte-transparent.
+
+## Acknowledgements
+
+idamap exists because of [ida-mcp-rs](https://github.com/blacktop/ida-mcp-rs) by blacktop, the headless IDA Pro
+MCP server it was built to accompany, and the [Model Context Protocol](https://modelcontextprotocol.io).
 
 ## License
 

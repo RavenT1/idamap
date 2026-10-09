@@ -4,8 +4,12 @@
 yaptığı her tool çağrısını kaydeder ve reverse engineering çalışmasını canlı, gezilebilir bir haritaya dönüştürür:
 nelere bakıldı, şu an ne çalışıyor, neden ve neler hâlâ keşfedilmedi.
 
-Şeffaf bir proxy sayesinde **her MCP istemcisiyle** çalışır: Claude Code, Cursor, Codex, Claude Desktop,
-VS Code / Copilot, Gemini CLI, Windsurf, Zed, Cline, … ida-mcp'ye veya IDA'ya dokunmaz.
+ida-mcp'nin önünde şeffaf bir proxy olarak durur; ida-mcp'ye veya IDA'ya dokunmadan MCP istemcileriyle çalışır
+(gerçekte nelerin test edildiği için [Uyumluluk](#uyumluluk) bölümüne bak).
+
+> idamap, blacktop'un [**ida-mcp-rs**](https://github.com/blacktop/ida-mcp-rs) projesine eşlik eden bağımsız bir
+> araçtır. ida-mcp'nin kodunu içermez: ida-mcp'yi başlatır ve MCP mesajlarını aktarır. blacktop veya Hex-Rays ile
+> bağlantılı değildir ve onlar tarafından onaylanmamıştır. IDA Pro, Hex-Rays'in ürünüdür.
 
 > English: [README.md](README.md)
 
@@ -137,6 +141,18 @@ varsayılan olarak kapalıdır.
   başka kaynaklardan gelen / JSON olmayan yazma isteklerini reddeder.
 - Veritabanı analiz ettiğin binary'lerden çıktılar (pseudocode, string'ler) içerir; IDA veritabanı gibi muamele et.
 
+## Uyumluluk
+
+| | Durum |
+|---|---|
+| macOS + ida-mcp-rs + **Claude Code**, **Codex CLI**, **omp** | gerçek oturumlarla uçtan uca test edildi |
+| Linux, Python 3.10 ve 3.13 | birim testleri geçiyor (sahte ida-mcp); gerçek IDA ile test edilmedi |
+| Windows | test edilmedi |
+| Diğer MCP istemcileri (Cursor, Claude Desktop, VS Code, Gemini CLI, …) | çalışması beklenir (proxy stdio ve Streamable HTTP üzerinden standart MCP konuşur), doğrulanmadı |
+| Diğer IDA MCP sunucuları (mrexodia/ida-pro-mcp, Hex-Rays'in kendi sunucusu, …) | test edilmedi; araç adları farklı olabilir |
+
+Diğer kurulumlar için geri bildirim ve düzeltmeler memnuniyetle karşılanır.
+
 ## Sorun giderme
 
 | Belirti | Çözüm |
@@ -145,6 +161,12 @@ varsayılan olarak kapalıdır.
 | İstemci sunucuyu başlatamıyor | mutlak yollar kullan (`idamap mcp-config` yazar) |
 | İstemci `mcp-client` görünüyor | `idamap proxy --harness istemcim -- ida-mcp` |
 | Kapsama birkaç fonksiyonla sınırlı | tam haritayı içe aktar |
+
+## Teşekkür
+
+idamap, eşlik etmek üzere geliştirildiği headless IDA Pro MCP sunucusu blacktop'un
+[ida-mcp-rs](https://github.com/blacktop/ida-mcp-rs) projesi ve [Model Context Protocol](https://modelcontextprotocol.io)
+sayesinde var.
 
 ## Lisans
 
