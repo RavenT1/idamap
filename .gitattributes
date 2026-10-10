@@ -1,0 +1,4 @@
+# the vendored library should not count as this project's JavaScript in GitHub's language statistics
+idamap/web/vendor/* linguist-vendored
+*.gif binary
+*.jpg binary

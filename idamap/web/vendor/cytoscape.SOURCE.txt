@@ -1,0 +1,10 @@
+cytoscape.min.js is Cytoscape.js 3.34.3, unmodified.
+
+Source:  npm package cytoscape@3.34.3, file package/dist/cytoscape.min.js
+SHA-256: 5f3b5b529546d5af1fc5628590af033b74511a5b6f789f5f4682845863228b91
+
+Verified 2026-10-10: the tarball matches the sha512 integrity value the npm registry publishes for it, and
+the file is byte-identical to the copies served by cdn.jsdelivr.net, cdnjs.cloudflare.com and unpkg.com.
+
+To update: download the new release from npm, check it the same way, replace cytoscape.min.js and
+cytoscape.LICENSE, and change this note.
