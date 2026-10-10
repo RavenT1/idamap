@@ -81,6 +81,26 @@ def home() -> Path:
     return Path(os.environ.get("IDAMAP_HOME") or Path.home() / ".idamap")
 
 
+def ensure_home() -> Path:
+    """Create the state directory private to the user.
+
+    It holds decompiled code, strings and notes from the binaries you analyse, so it is created 0700, and a
+    default ~/.idamap left world-readable by an older version is tightened. A directory you pointed
+    IDAMAP_HOME at yourself is left alone unless idamap creates it."""
+    h = home()
+    try:
+        if not h.exists():
+            h.parent.mkdir(parents=True, exist_ok=True)
+            h.mkdir(mode=0o700, exist_ok=True)
+        elif not os.environ.get("IDAMAP_HOME") and os.name == "posix":
+            st = h.stat()
+            if st.st_uid == os.getuid() and st.st_mode & 0o077:
+                h.chmod(0o700)
+    except OSError:
+        pass
+    return h
+
+
 def db_path() -> Path:
     return home() / "idamap.db"
 
@@ -253,7 +273,10 @@ CREATE TABLE IF NOT EXISTS segments (
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
     path = path or db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent == home():
+        ensure_home()
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     fresh = not path.exists()  # e.g. the user deleted it while the server was running
     conn = sqlite3.connect(str(path), timeout=10, isolation_level=None)
     conn.row_factory = sqlite3.Row
@@ -261,6 +284,11 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA foreign_keys=OFF")
+    if fresh:
+        try:
+            os.chmod(path, 0o600)  # the -wal / -shm files SQLite creates later copy these permissions
+        except OSError:
+            pass
     key = str(path.resolve())
     if fresh or key not in _initialized:  # schema + migrations once per process and file
         conn.executescript(SCHEMA)

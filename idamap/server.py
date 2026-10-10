@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import gzip
+import hmac
 import json
 import mimetypes
 import re
+import secrets
 import threading
 import time
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -23,6 +26,26 @@ WEB = Path(__file__).parent / "web"
 EXPORT_SCRIPT = Path(__file__).parent / "ida_scripts" / "export_map.py"
 
 _local = threading.local()
+
+MAX_BODY = 1 << 20  # the UI only ever writes short JSON (a note, a status): refuse anything bigger
+
+# Sent with every response. The UI renders text that comes from analysed binaries and from the model, so it
+# gets a strict policy (no inline script, no foreign origins) and may not be framed (clickjacking the
+# "delete records" button).
+SECURITY_HEADERS = {
+    "Content-Security-Policy": ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                                "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; "
+                                "frame-ancestors 'none'"),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Cross-Origin-Opener-Policy": "same-origin",
+}
+
+
+class _TooLarge(Exception):
+    pass
 
 
 def conn():
@@ -57,7 +80,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        for k, v in (extra or {}).items():
+        for k, v in {**SECURITY_HEADERS, **(extra or {})}.items():
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
@@ -70,6 +93,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _body(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
+        if n < 0 or n > MAX_BODY:
+            raise _TooLarge
         return json.loads(self.rfile.read(n) or b"{}") if n else {}
 
     # ---------------------------------------------------------------- security
@@ -85,11 +110,43 @@ class Handler(BaseHTTPRequestHandler):
         names = {host, "localhost", "127.0.0.1", "[::1]", "::1"}
         return {f"{n}:{port}" for n in names} | {n for n in names if port == 80}
 
+    def _token_ok(self) -> bool:
+        """Optional shared secret: `idamap serve --token`, always on when listening beyond localhost.
+
+        The first visit carries it in the URL (?token=...); it is then kept in a cookie scoped to this port, so
+        the page, its API calls and the event stream need nothing else."""
+        token = getattr(self.server, "token", None)
+        if not token:
+            return True
+        name = f"idamap_token_{self.server.server_address[1]}"
+        jar = SimpleCookie()
+        try:
+            jar.load(self.headers.get("Cookie") or "")
+        except Exception:  # noqa: BLE001 — a malformed Cookie header is just "no cookie"
+            pass
+        if name in jar and hmac.compare_digest(jar[name].value, token):
+            return True
+        u = urlparse(self.path)
+        given = (parse_qs(u.query).get("token") or [""])[-1]
+        if self.command == "GET" and u.path in ("", "/") and given and hmac.compare_digest(given, token):
+            self.send_response(302)
+            self.send_header("Set-Cookie", f"{name}={token}; Path=/; HttpOnly; SameSite=Strict")
+            self.send_header("Location", "/")
+            self.send_header("Content-Length", "0")
+            for k, v in SECURITY_HEADERS.items():
+                self.send_header(k, v)
+            self.end_headers()
+            return False
+        self._err(401, "token required: open the URL printed by `idamap serve`")
+        return False
+
     def _guard(self, write: bool) -> bool:
         allowed = self._allowed_hosts()
         hosthdr = (self.headers.get("Host") or "").lower()
         if allowed is not None and hosthdr not in allowed:
             self._err(403, "forbidden host")
+            return False
+        if not self._token_ok():
             return False
         if write:
             origin = self.headers.get("Origin")
@@ -182,6 +239,8 @@ class Handler(BaseHTTPRequestHandler):
                                ((body["label"] or "").strip() or None, int(m.group(1))))
                 return self._json({"ok": True})
             return self._err(404, "not found")
+        except _TooLarge:
+            return self._err(413, "request body too large")
         except Exception as e:  # noqa: BLE001
             return self._err(500, f"{type(e).__name__}: {e}")
 
@@ -214,6 +273,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
+        for k, v in SECURITY_HEADERS.items():
+            self.send_header(k, v)
         self.end_headers()
         c = conn()
         # Hooks commit a moment after they stamp updated_at, so a row can land
@@ -265,16 +326,20 @@ def delete_database(c, db: int) -> None:
     c.execute("DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM calls)")
 
 
-def serve(host: str = "127.0.0.1", port: int = 8777, open_browser: bool = False) -> None:
+def serve(host: str = "127.0.0.1", port: int = 8777, open_browser: bool = False, token: bool = False) -> None:
     S.connect().close()  # create schema
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
+    beyond = host not in ("127.0.0.1", "localhost", "::1")
+    httpd.token = secrets.token_urlsafe(24) if (token or beyond) else None  # type: ignore[attr-defined]
     shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
-    url = f"http://{shown}:{port}/"
-    print(f"idamap {__version__} — {url}  (db: {S.db_path()})")
-    if host not in ("127.0.0.1", "localhost", "::1"):
-        print("WARNING: listening beyond localhost. idamap has no authentication; anyone who can reach this "
-              "port can read your research data and the code snippets in it.")
+    url = f"http://{shown}:{port}/" + (f"?token={httpd.token}" if httpd.token else "")  # type: ignore[attr-defined]
+    print(f"idamap {__version__} — {url}  (db: {S.db_path()})", flush=True)
+    if httpd.token:  # type: ignore[attr-defined]
+        print("Access needs the token in this URL (a random one per run); it is kept in a cookie afterwards.", flush=True)
+    if beyond:
+        print("WARNING: listening beyond localhost. Anyone who can reach this port and has the token can read your "
+              "research data and the code snippets in it; the connection is not encrypted.", flush=True)
     if open_browser:
         import webbrowser
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()

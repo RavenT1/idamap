@@ -3,6 +3,7 @@ coverage back into the IDA GUI."""
 
 from __future__ import annotations
 
+import html
 import json
 import time
 
@@ -14,19 +15,30 @@ def _t(ts) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "—"
 
 
+# Everything below the hard-coded labels is text from an analysed binary or from a model that read one. A
+# Markdown viewer that renders raw HTML (many do) must not get to see tags in it, and a stray backtick must not
+# close a code span early, so free text is HTML-escaped and code spans lose their backticks.
+def _esc(s) -> str:
+    return html.escape(str(s if s is not None else ""), quote=False)
+
+
+def _cs(s) -> str:
+    return str(s if s is not None else "").replace("`", "'").replace("\n", " ").replace("\r", " ")
+
+
 def _md(s) -> str:
-    return str(s or "").replace("|", "\\|").replace("\n", " ")
+    return _esc(str(s or "")).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
 
 def markdown(conn, db_id: int) -> str:
     sm = Q.summary(conn, db_id)
     d = sm["db"] or {}
     total = d.get("func_total") or d.get("known") or 0
-    lines = [f"# Reverse engineering log — {d.get('name')}", ""]
-    lines += [f"- **Database**: `{d.get('key')}`",
-              f"- **Input**: `{d.get('input_path') or '—'}`",
-              f"- **Processor**: {d.get('processor') or '—'} / {d.get('file_type') or '—'}",
-              f"- **SHA-256**: `{d.get('sha256') or '—'}`",
+    lines = [f"# Reverse engineering log — {_md(d.get('name'))}", ""]
+    lines += [f"- **Database**: `{_cs(d.get('key'))}`",
+              f"- **Input**: `{_cs(d.get('input_path') or '—')}`",
+              f"- **Processor**: {_md(d.get('processor') or '—')} / {_md(d.get('file_type') or '—')}",
+              f"- **SHA-256**: `{_cs(d.get('sha256') or '—')}`",
               f"- **Tool calls**: {d.get('calls')} across {sm['sessions']} session(s)",
               f"- **Generated**: {_t(time.time())}", ""]
     lines += ["## Coverage", "", "| Stage | Functions |", "|---|---|"]
@@ -45,7 +57,7 @@ def markdown(conn, db_id: int) -> str:
     for f in funcs:
         name = f["name"] or "sub_%X" % S.from_i(f["start_i"])
         if f["orig_name"] and f["orig_name"] != f["name"]:
-            name += f" (was `{f['orig_name']}`)"
+            name += f" (was `{_cs(f['orig_name'])}`)"
         lines.append(f"| {_md(name)} | `{f['start']}` | {S.stage_of(f['flags'])} | "
                      f"{', '.join(S.flag_list(f['flags']))} | {f['human_status'] or ''} | {_md(f['note'])} |")
     lines.append("")
@@ -97,15 +109,15 @@ def markdown(conn, db_id: int) -> str:
         prev = r
         if key != cur:
             cur = key
-            via = f" via {r['harness']}" if r["harness"] else ""
+            via = f" via {_md(r['harness'])}" if r["harness"] else ""
             if r["prompt_id"]:
                 txt = (prompts.get(r["prompt_id"]) or "(prompt unavailable)").strip()
-                lines += ["", f"### {_t(r['started_at'])} — task{via}", "", "> " + txt[:600].replace("\n", "\n> "), ""]
+                lines += ["", f"### {_t(r['started_at'])} — task{via}", "", "> " + _esc(txt[:600]).replace("\n", "\n> "), ""]
             else:
                 lines += ["", f"### {_t(r['started_at'])} — work block{via}", ""]
         if r["intent"] and r["intent"] != last_intent:
             last_intent = r["intent"]
-            lines += ["", f"*{r['intent'].strip()[:400]}*", ""]
+            lines += ["", f"*{_md(r['intent'].strip()[:400])}*", ""]
         mark = "✗" if r["status"] == "error" else "·"
         lines.append(f"- {mark} `{r['tool']}` {_md(r['target'])}" + (f" — **{_md(r['error'])[:120]}**" if r["error"] else ""))
     lines.append("")
@@ -134,7 +146,9 @@ def ida_sync_script(conn, db_id: int) -> str:
     data = [[r["start"], S.stage_of(r["flags"]), ", ".join(S.flag_list(r["flags"])), r["touch_count"],
              r["human_status"], r["note"], expl.get(r["start"])] for r in rows]
     d = conn.execute("SELECT name, key FROM databases WHERE id=?", (db_id,)).fetchone()
-    title = f"{d['name']} ({d['key']})".replace("\n", " ").replace("\r", " ")
+    # a file name is attacker-influenced and this lands in a comment of a script the analyst runs inside IDA:
+    # no line-break of any kind (\n, \r, U+2028, ...) may survive
+    title = "".join(ch if ch.isprintable() else " " for ch in f"{d['name']} ({d['key']})")
     return f'''# idamap → IDA coverage sync for {title}
 # Generated {_t(time.time())}. Run in IDA: File > Script file…
 # Colours every function the LLM worked on by coverage stage and adds a

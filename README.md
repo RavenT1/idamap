@@ -127,11 +127,16 @@ the MCP stream. Records are **per binary**: another IDB of the same input (same 
 
 ## Security and privacy
 
-- Everything stays on your machine (`~/.idamap/`, or `IDAMAP_HOME`). idamap makes no network requests.
-- The UI binds to `127.0.0.1` and rejects foreign `Host` headers and cross-origin writes. `idamap serve --host
-  0.0.0.0` exposes your research data to your network.
+- Everything stays on your machine (`~/.idamap/`, or `IDAMAP_HOME`), readable by you only. idamap makes no
+  network requests.
+- The UI listens on `127.0.0.1`, sends a strict Content-Security-Policy and rejects foreign `Host` / `Origin`
+  headers and cross-origin writes. It has no login, so any local user can reach it: on a shared machine start it with
+  `idamap serve --token` (always required with a non-loopback `--host`).
+- The HTTP proxy accepts only loopback `Host` / `Origin` values. What is behind it can run code in IDA, so do not
+  expose it beyond localhost.
 - The database contains tool output (pseudocode, strings) from the binaries you analyze. Treat it like the IDA
-  database itself.
+  database itself. Names, strings and model-written explanations are untrusted input; see [SECURITY.md](SECURITY.md)
+  for the threat model and how to report a vulnerability.
 
 ## Compatibility
 

@@ -54,8 +54,7 @@ def harness_name(client_info: dict | None) -> str:
 
 def _log_error(where: str) -> None:
     try:
-        log = S.home() / "proxy_errors.log"
-        log.parent.mkdir(parents=True, exist_ok=True)
+        log = S.ensure_home() / "proxy_errors.log"
         with open(log, "a", encoding="utf-8") as fh:
             fh.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} {where}\n{traceback.format_exc()}\n")
     except Exception:  # noqa: BLE001
@@ -576,6 +575,10 @@ class _SSE:
                 yield data
 
 
+MAX_HTTP_BODY = 64 * 1024 * 1024
+_LOOPBACK = ("localhost", "127.0.0.1", "::1")
+
+
 def make_http_proxy(listen: str, upstream: str, harness: str | None = None,
                     virtual_tools: bool = False) -> ThreadingHTTPServer:
     up = urlsplit(upstream)
@@ -603,6 +606,34 @@ def make_http_proxy(listen: str, upstream: str, harness: str | None = None,
 
         def do_OPTIONS(self):
             self._forward("OPTIONS")
+
+        # The proxy is the MCP server its clients see, and what is behind it can run code (run_script, patch).
+        # MCP requires servers to validate Origin against DNS rebinding; the Host header is rewritten for the
+        # upstream below, so this is the only place a rebinding attempt can still be noticed.
+        def _refuse(self, status: int, msg: str) -> None:
+            data = json.dumps({"error": msg}).encode()
+            self.close_connection = True  # the request body (if any) was not read
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _allowed(self) -> bool:
+            host, port = self.server.server_address[:2]
+            if host in ("0.0.0.0", "::"):
+                return True  # the operator chose to listen beyond localhost (run_http warns)
+            names = {host, *_LOOPBACK, "[::1]"}
+            hosthdr = (self.headers.get("Host") or "").lower()
+            if hosthdr not in {f"{n}:{port}" for n in names}:
+                self._refuse(403, "forbidden host")
+                return False
+            origin = self.headers.get("Origin")
+            if origin is not None and (urlsplit(origin).hostname or "") not in _LOOPBACK:
+                self._refuse(403, "forbidden origin")
+                return False
+            return True
 
         def _upstream_for(self, session: str):
             """Callable that runs an ida-mcp tool on this client's own MCP session."""
@@ -637,7 +668,14 @@ def make_http_proxy(listen: str, upstream: str, harness: str | None = None,
             return call
 
         def _forward(self, method: str):
-            n = int(self.headers.get("Content-Length") or 0)
+            if not self._allowed():
+                return
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return self._refuse(400, "bad Content-Length")
+            if n < 0 or n > MAX_HTTP_BODY:
+                return self._refuse(413, "request body too large")
             body = self.rfile.read(n) if n else None
             sid = self.headers.get("Mcp-Session-Id")
             session = f"http-{sid}" if sid else anon
@@ -766,6 +804,9 @@ def _augment_body(obs: Observer, session: str, data: bytes, sse: bool) -> bytes:
 def run_http(listen: str, upstream: str, harness: str | None = None, virtual_tools: bool = False) -> int:
     httpd = make_http_proxy(listen, upstream, harness, virtual_tools)
     sys.stderr.write(f"idamap proxy: http://{listen}/  ->  {upstream}\n")
+    if httpd.server_address[0] in ("0.0.0.0", "::"):
+        sys.stderr.write("WARNING: listening beyond localhost. This proxy has no authentication and what is behind "
+                         "it can run code in IDA (run_script, patch): anyone who can reach this port can use it.\n")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

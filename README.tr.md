@@ -122,10 +122,16 @@ devam eder.
 
 ## Güvenlik ve gizlilik
 
-- Her şey senin makinende kalır (`~/.idamap/` veya `IDAMAP_HOME`). idamap ağa istek atmaz.
-- Arayüz `127.0.0.1`'e bağlanır; yabancı `Host` başlıklarını ve başka kaynaklardan gelen yazma isteklerini reddeder.
-  `idamap serve --host 0.0.0.0` araştırma verini ağına açar.
+- Her şey senin makinende kalır (`~/.idamap/` veya `IDAMAP_HOME`) ve yalnızca senin tarafından okunabilir. idamap
+  ağa istek atmaz.
+- Arayüz `127.0.0.1`'e bağlanır, sıkı bir Content-Security-Policy gönderir; yabancı `Host` / `Origin` başlıklarını ve
+  başka kaynaklardan gelen yazma isteklerini reddeder. Girişi yoktur, yani aynı makinedeki her kullanıcı erişebilir:
+  paylaşımlı makinede `idamap serve --token` ile başlat (loopback dışı `--host` ile her zaman zorunludur).
+- HTTP proxy yalnızca loopback `Host` / `Origin` değerlerini kabul eder. Arkasındaki sunucu IDA'da kod çalıştırabilir;
+  localhost dışına açma.
 - Veritabanı, analiz ettiğin binary'lerden çıktılar (pseudocode, string'ler) içerir; IDA veritabanı gibi muamele et.
+  İsimler, string'ler ve modelin yazdığı açıklamalar güvenilmeyen girdidir; tehdit modeli ve güvenlik açığı bildirimi
+  için [SECURITY.md](SECURITY.md).
 
 ## Uyumluluk
 

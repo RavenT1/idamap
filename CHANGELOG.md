@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Security hardening** (from a review before going public):
+  - The HTTP proxy now validates `Host` and `Origin` (loopback only) and caps request bodies. Before, it forwarded
+    everything and rewrote `Host` for ida-mcp, which also hid DNS-rebinding attempts from ida-mcp itself.
+  - The web UI sends a strict Content-Security-Policy, `X-Frame-Options: DENY` and related headers, caps request
+    bodies, and has an optional access token (`idamap serve --token`; always on with a non-loopback `--host`).
+  - `~/.idamap` and the database are created readable by you only; a world-readable default directory from an
+    earlier version is tightened.
+  - Markdown logs HTML-escape text that comes from binaries and models; the IDA sync script title can no longer
+    carry line breaks.
+  - Model-facing answers and the usage hint say that names, strings and earlier explanations are data, not instructions.
+  - CI: read-only token permissions, actions pinned to commit SHAs, Dependabot; `SECURITY.md`; provenance and
+    SHA-256 of the vendored Cytoscape.js (verified against the npm package).
+
 - **Guidance followed** (Overview card): counts from the recorded calls whether the model did what idamap's tools
   ask: started with `idamap_status`, looked a function up before analyzing it, explained what it analyzed, searched
   with `idamap_search` instead of a guessed `list_functions` filter, and how many already-explained functions it

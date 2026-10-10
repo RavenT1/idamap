@@ -28,8 +28,7 @@ def main() -> int:
         try:
             from . import store
 
-            log = store.home() / "hook_errors.log"
-            log.parent.mkdir(parents=True, exist_ok=True)
+            log = store.ensure_home() / "hook_errors.log"
             with open(log, "a", encoding="utf-8") as fh:
                 fh.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')}\n{traceback.format_exc()}\n"
                          f"payload: {raw[:2000]}\n")
