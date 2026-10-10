@@ -43,8 +43,8 @@ def set_value(key: str, value) -> dict:
         raise KeyError(key)
     cfg = load()
     cfg[key] = value
+    S.ensure_home()
     p = _path()
-    p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(cfg, indent=2) + "\n")
     tmp.replace(p)

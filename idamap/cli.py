@@ -95,7 +95,7 @@ def cmd_uninstall(a) -> int:
 def cmd_serve(a) -> int:
     from .server import serve
 
-    serve(a.host, a.port, a.open)
+    serve(a.host, a.port, a.open, a.token)
     return 0
 
 
@@ -270,6 +270,8 @@ def main(argv=None) -> int:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8777)
     s.add_argument("--open", action="store_true", help="open the browser")
+    s.add_argument("--token", action="store_true",
+                   help="require a random token (kept in a cookie) for every request; always on with a non-loopback --host")
     s.set_defaults(fn=cmd_serve)
 
     for name, fn, hlp in (("install", cmd_install, "add Claude Code hooks"),
