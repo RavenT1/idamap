@@ -9,7 +9,8 @@ bakıldı, şu an ne çalışıyor ve neler hâlâ keşfedilmedi.
 > ida-mcp'nin önünde bir proxy olarak durur. ida-mcp-rs'i (ve gerektirdiği şeyleri, örneğin IDA Pro) onun README'sini
 > izleyerek kur ve idamap'i eklemeden önce tek başına çalıştığından emin ol.
 
-![Genel bakış](docs/overview.jpg)
+<p align="center"><img src="docs/idamap-demo.gif" alt="idamap, bc üzerinde çalışan bir Claude Code oturumunu izliyor: kapsama haritası doluyor, çağrı grafiği keşif sırasını gösteriyor, bir LLM açıklaması onaylanıyor" width="880"></p>
+<p align="center"><sub>Gerçek bir oturum (Claude Code, ida-mcp üzerinden macOS'in açık kaynak <code>bc</code>'sini inceliyor), hızlandırılmış tekrar.</sub></p>
 
 Bağımsız bir projedir; blacktop veya Hex-Rays ile bağlantılı değildir ve onlar tarafından onaylanmamıştır.
 English: [README.md](README.md)

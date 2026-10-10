@@ -9,7 +9,8 @@ is running right now, and what is still unexplored.
 > it only sits in front of ida-mcp as a proxy. Set up ida-mcp-rs (and what it requires, such as IDA Pro) by
 > following its README, and check that it works on its own before adding idamap.
 
-![Overview: coverage, focus trail with the LLM's suggested names, tool usage](docs/overview.jpg)
+<p align="center"><img src="docs/idamap-demo.gif" alt="idamap watching a Claude Code session on bc: the coverage map fills in, the call graph shows the order of exploration, and an LLM explanation is confirmed" width="880"></p>
+<p align="center"><sub>A real session (Claude Code analysing macOS's open-source <code>bc</code> through ida-mcp), replayed faster.</sub></p>
 
 An independent project, not affiliated with or endorsed by blacktop or Hex-Rays. Türkçe: [README.tr.md](README.tr.md)
 
