@@ -12,3 +12,13 @@ dist/
 *.nam
 *.til
 .DS_Store
+# state and secrets must never be committed: idamap's own data directory, databases, logs, local credentials
+.idamap/
+*.db
+*.db-wal
+*.db-shm
+*.log
+.env
+.env.*
+*.pem
+*.key

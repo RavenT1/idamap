@@ -128,7 +128,7 @@ the MCP stream. Records are **per binary**: another IDB of the same input (same 
 ## Security and privacy
 
 - Everything stays on your machine (`~/.idamap/`, or `IDAMAP_HOME`), readable by you only. idamap makes no
-  network requests.
+  network requests. Its error logs (`*_errors.log`) hold tracebacks only, never prompts or tool output.
 - The UI listens on `127.0.0.1`, sends a strict Content-Security-Policy and rejects foreign `Host` / `Origin`
   headers and cross-origin writes. It has no login, so any local user can reach it: on a shared machine start it with
   `idamap serve --token` (always required with a non-loopback `--host`).

@@ -271,6 +271,28 @@ CREATE TABLE IF NOT EXISTS segments (
 """
 
 
+LOG_LIMIT = 1 << 20
+
+
+def append_log(name: str, text: str, limit: int = LOG_LIMIT) -> None:
+    """Append to a log in the state directory: readable by you only, and rotated once past ``limit`` so a
+    failure that repeats on every call cannot fill the disk."""
+    path = ensure_home() / name
+    try:
+        if path.exists() and path.stat().st_size > limit:
+            os.replace(path, path.with_name(name + ".1"))
+    except OSError:
+        pass
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
+        fh.write(text)
+    try:
+        if os.name == "posix" and path.stat().st_mode & 0o077:
+            os.chmod(path, 0o600)  # a log written by an older version
+    except OSError:
+        pass
+
+
 def connect(path: Path | None = None) -> sqlite3.Connection:
     path = path or db_path()
     if path.parent == home():

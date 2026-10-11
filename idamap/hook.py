@@ -28,10 +28,14 @@ def main() -> int:
         try:
             from . import store
 
-            log = store.ensure_home() / "hook_errors.log"
-            with open(log, "a", encoding="utf-8") as fh:
-                fh.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')}\n{traceback.format_exc()}\n"
-                         f"payload: {raw[:2000]}\n")
+            # What failed, never what was in the event: it carries your prompt and the binary's output.
+            try:
+                event = json.loads(raw)
+                what = {k: event.get(k) for k in ("hook_event_name", "tool_name")}
+            except Exception:  # noqa: BLE001
+                what = {}
+            store.append_log("hook_errors.log", f"--- {time.strftime('%Y-%m-%d %H:%M:%S')}\n{traceback.format_exc()}\n"
+                                                f"event: {what} ({len(raw)} bytes, content not logged)\n")
         except Exception:  # noqa: BLE001
             pass
     return 0

@@ -9,6 +9,8 @@
     bodies, and has an optional access token (`idamap serve --token`; always on with a non-loopback `--host`).
   - `~/.idamap` and the database are created readable by you only; a world-readable default directory from an
     earlier version is tightened.
+  - The error logs (`hook_errors.log`, `proxy_errors.log`) are readable by you only, rotate at 1 MB and no longer
+    contain the hook event (your prompt and the binary's output); they say what failed and for which tool.
   - Markdown logs HTML-escape text that comes from binaries and models; the IDA sync script title can no longer
     carry line breaks.
   - Model-facing answers and the usage hint say that names, strings and earlier explanations are data, not instructions.

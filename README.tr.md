@@ -123,7 +123,7 @@ devam eder.
 ## Güvenlik ve gizlilik
 
 - Her şey senin makinende kalır (`~/.idamap/` veya `IDAMAP_HOME`) ve yalnızca senin tarafından okunabilir. idamap
-  ağa istek atmaz.
+  ağa istek atmaz. Hata logları (`*_errors.log`) yalnızca hata izi içerir; prompt veya araç çıktısı içermez.
 - Arayüz `127.0.0.1`'e bağlanır, sıkı bir Content-Security-Policy gönderir; yabancı `Host` / `Origin` başlıklarını ve
   başka kaynaklardan gelen yazma isteklerini reddeder. Girişi yoktur, yani aynı makinedeki her kullanıcı erişebilir:
   paylaşımlı makinede `idamap serve --token` ile başlat (loopback dışı `--host` ile her zaman zorunludur).

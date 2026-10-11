@@ -209,7 +209,7 @@ class ProxyHttpGuardTests(unittest.TestCase):
 
 
 @unittest.skipUnless(os.name == "posix", "permission bits")
-class StateDirectoryTests(unittest.TestCase):
+class _HomeCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.saved = {k: os.environ.get(k) for k in ("HOME", "IDAMAP_HOME")}
@@ -226,6 +226,8 @@ class StateDirectoryTests(unittest.TestCase):
     def mode(p):
         return stat.S_IMODE(os.stat(p).st_mode)
 
+
+class StateDirectoryTests(_HomeCase):
     def test_a_new_state_directory_and_database_are_private(self):
         home = Path(self.tmp.name) / "new-home"
         os.environ["IDAMAP_HOME"] = str(home)
@@ -253,6 +255,42 @@ class StateDirectoryTests(unittest.TestCase):
         os.environ["IDAMAP_HOME"] = str(d)
         store.connect().close()
         self.assertEqual(self.mode(d), 0o755)
+
+
+class LogTests(_HomeCase):
+    def setUp(self):
+        super().setUp()
+        self.home = Path(self.tmp.name) / "h"
+        os.environ["IDAMAP_HOME"] = str(self.home)
+
+    def test_logs_are_private_and_rotate(self):
+        store.append_log("x.log", "a" * 100, limit=50)
+        store.append_log("x.log", "b" * 10, limit=50)
+        self.assertEqual((self.home / "x.log").read_text(), "b" * 10)
+        self.assertEqual((self.home / "x.log.1").read_text(), "a" * 100)
+        for f in ("x.log", "x.log.1"):
+            self.assertEqual(self.mode(self.home / f) & 0o077, 0, f)
+
+    def test_an_old_world_readable_log_is_tightened(self):
+        self.home.mkdir(mode=0o700)
+        (self.home / "y.log").write_text("old")
+        os.chmod(self.home / "y.log", 0o644)
+        store.append_log("y.log", "new")
+        self.assertEqual(self.mode(self.home / "y.log") & 0o077, 0)
+
+    def test_a_failing_hook_logs_what_failed_but_not_what_the_event_said(self):
+        import io
+        from unittest import mock
+        from idamap import hook, ingest
+        event = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "mcp__ida__decompile",
+                            "prompt": "the secret prompt text", "tool_response": "int secret_pseudocode;"})
+        with mock.patch("sys.stdin", io.StringIO(event)), mock.patch.object(ingest, "handle", side_effect=RuntimeError("boom")):
+            self.assertEqual(hook.main(), 0)
+        log = (self.home / "hook_errors.log").read_text()
+        self.assertIn("boom", log)
+        self.assertIn("mcp__ida__decompile", log)
+        self.assertNotIn("secret", log)
+        self.assertEqual(self.mode(self.home / "hook_errors.log") & 0o077, 0)
 
 
 class HostileContentTests(Base):

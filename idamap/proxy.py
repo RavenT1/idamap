@@ -54,9 +54,7 @@ def harness_name(client_info: dict | None) -> str:
 
 def _log_error(where: str) -> None:
     try:
-        log = S.ensure_home() / "proxy_errors.log"
-        with open(log, "a", encoding="utf-8") as fh:
-            fh.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} {where}\n{traceback.format_exc()}\n")
+        S.append_log("proxy_errors.log", f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} {where}\n{traceback.format_exc()}\n")
     except Exception:  # noqa: BLE001
         pass
 
