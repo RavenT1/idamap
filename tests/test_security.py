@@ -4,7 +4,10 @@ import ast
 import http.client
 import json
 import os
+import re
+import shutil
 import stat
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -209,6 +212,38 @@ class ProxyHttpGuardTests(unittest.TestCase):
 
 
 @unittest.skipUnless(os.name == "posix", "permission bits")
+class WebHardeningTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["IDAMAP_HOME"] = self.tmp.name
+        store.connect().close()
+        self.httpd = serve()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.tmp.cleanup()
+
+    def test_no_path_leaves_the_web_directory(self):
+        for path in ("/../server.py", "/%2e%2e/server.py", "/vendor/../../store.py", "/..%2fstore.py",
+                     "//etc/passwd", "/app.js%00.py", "/vendor/", "/\\..\\store.py"):
+            status, _, body = get(self.httpd.server_port, path)
+            self.assertEqual(status, 404, path)
+            self.assertNotIn(b"import sqlite3", body, path)
+        self.assertEqual(get(self.httpd.server_port, "/app.js")[0], 200)
+
+    def test_a_header_value_cannot_carry_a_line_break(self):
+        self.assertEqual(server._clean("a\r\nSet-Cookie: x=1"), "a  Set-Cookie: x=1")
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed")
+    def test_the_code_highlighter_has_no_catastrophic_backtracking(self):
+        src = (Path(server.__file__).parent / "web" / "app.js").read_text()
+        literal = re.search(r"function highlightC\(src\) \{.*?const re = (/.+/g);", src, re.S).group(1)
+        script = f"const re = {literal}; re.exec('1' + 'ui64'.repeat(5000) + 'x'); console.log('done')"
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.strip(), "done", out.stderr)
+
+
 class _HomeCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

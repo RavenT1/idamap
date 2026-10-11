@@ -718,7 +718,7 @@ def make_http_proxy(listen: str, upstream: str, harness: str | None = None,
             ctype = (resp.getheader("Content-Type") or "").lower()
             self.send_response(resp.status, resp.reason)
             for k, v in resp.getheaders():
-                if k.lower() not in _HOP:
+                if k.lower() not in _HOP and not any(c in k + v for c in "\r\n"):
                     self.send_header(k, v)
             observe_session = session
             try:

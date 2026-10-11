@@ -1094,7 +1094,7 @@ const C_KW = /^(if|else|for|while|do|return|goto|break|continue|switch|case|defa
 const C_TY = /^(void|char|short|int|long|float|double|bool|_BOOL\d|_BYTE|_WORD|_DWORD|_QWORD|__int\d+|_OWORD|size_t|uint\d+_t|int\d+_t|id|SEL|Class|BOOL|NSString|NSObject)$/;
 function highlightC(src) {
   const frag = document.createDocumentFragment();
-  const re = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|\b(0x[0-9A-Fa-f]+|\d+)(?:u|LL|i64|ui64)*\b|([A-Za-z_]\w*)/g;
+  const re = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|\b(0x[0-9A-Fa-f]+|\d+)u?(?:LL|i64)?\b|([A-Za-z_]\w*)/g;
   let last = 0, m;
   while ((m = re.exec(src))) {
     if (m.index > last) frag.append(src.slice(last, m.index));

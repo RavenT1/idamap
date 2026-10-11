@@ -6,6 +6,7 @@ import gzip
 import hmac
 import json
 import mimetypes
+import os
 import re
 import secrets
 import threading
@@ -23,6 +24,11 @@ from . import report
 from . import store as S
 
 WEB = Path(__file__).parent / "web"
+
+
+def _clean(value) -> str:
+    """A response header value can never carry a line break (it would end the header and start another)."""
+    return str(value).replace("\r", " ").replace("\n", " ")
 EXPORT_SCRIPT = Path(__file__).parent / "ida_scripts" / "export_map.py"
 
 _local = threading.local()
@@ -81,7 +87,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         for k, v in {**SECURITY_HEADERS, **(extra or {})}.items():
-            self.send_header(k, v)
+            self.send_header(k, _clean(v))
         self.end_headers()
         self.wfile.write(body)
 
@@ -130,11 +136,11 @@ class Handler(BaseHTTPRequestHandler):
         given = (parse_qs(u.query).get("token") or [""])[-1]
         if self.command == "GET" and u.path in ("", "/") and given and hmac.compare_digest(given, token):
             self.send_response(302)
-            self.send_header("Set-Cookie", f"{name}={token}; Path=/; HttpOnly; SameSite=Strict")
+            self.send_header("Set-Cookie", _clean(f"{name}={token}; Path=/; HttpOnly; SameSite=Strict"))
             self.send_header("Location", "/")
             self.send_header("Content-Length", "0")
             for k, v in SECURITY_HEADERS.items():
-                self.send_header(k, v)
+                self.send_header(k, _clean(v))
             self.end_headers()
             return False
         self._err(401, "token required: open the URL printed by `idamap serve`")
@@ -257,9 +263,11 @@ class Handler(BaseHTTPRequestHandler):
     def _static(self, p: str):
         if p in ("", "/"):
             p = "/index.html"
-        f = (WEB / p.lstrip("/")).resolve()
-        if WEB.resolve() not in f.parents or not f.is_file():
+        root = os.path.realpath(WEB)
+        path = os.path.realpath(os.path.join(root, p.lstrip("/")))
+        if not path.startswith(root + os.sep) or not os.path.isfile(path):
             return self._err(404, "not found")
+        f = Path(path)
         # explicit types: on Windows mimetypes reads the registry and may say text/plain for .js
         ctype = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml"}.get(
             f.suffix) or mimetypes.guess_type(f.name)[0] or "application/octet-stream"
@@ -274,7 +282,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
         for k, v in SECURITY_HEADERS.items():
-            self.send_header(k, v)
+            self.send_header(k, _clean(v))
         self.end_headers()
         c = conn()
         # Hooks commit a moment after they stamp updated_at, so a row can land
