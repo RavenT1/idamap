@@ -52,6 +52,11 @@ def harness_name(client_info: dict | None) -> str:
     return low or "mcp-client"
 
 
+def _clean(value) -> str:
+    """A header value relayed from upstream can never carry a line break."""
+    return str(value).replace("\r", " ").replace("\n", " ")
+
+
 def _log_error(where: str) -> None:
     try:
         S.append_log("proxy_errors.log", f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} {where}\n{traceback.format_exc()}\n")
@@ -718,8 +723,8 @@ def make_http_proxy(listen: str, upstream: str, harness: str | None = None,
             ctype = (resp.getheader("Content-Type") or "").lower()
             self.send_response(resp.status, resp.reason)
             for k, v in resp.getheaders():
-                if k.lower() not in _HOP and not any(c in k + v for c in "\r\n"):
-                    self.send_header(k, v)
+                if k.lower() not in _HOP and "\r" not in k and "\n" not in k:
+                    self.send_header(k, _clean(v))
             observe_session = session
             try:
                 if augment:  # small response we must rewrite: buffer it

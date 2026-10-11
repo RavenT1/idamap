@@ -83,7 +83,7 @@ class Handler(BaseHTTPRequestHandler):
             body = gzip.compress(body, compresslevel=5)
             extra = {**(extra or {}), "Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
         self.send_response(status)
-        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Type", _clean(ctype))
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         for k, v in {**SECURITY_HEADERS, **(extra or {})}.items():
