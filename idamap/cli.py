@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,14 +26,19 @@ def _settings_path(scope: str, project_dir: str | None) -> Path:
     return base / ".claude" / ("settings.json" if scope == "project" else "settings.local.json")
 
 
+def _quote(arg: str) -> str:
+    """One argument of a shell command line: a path with a quote, a space or a $ in it must stay one argument."""
+    return subprocess.list2cmdline([arg]) if os.name == "nt" else shlex.quote(arg)
+
+
 def _hook_command() -> str:
     """Command Claude Code runs; works whether idamap is installed or run from source."""
     py = sys.executable
     probe = subprocess.run([py, "-c", "import idamap"], cwd="/", capture_output=True)
     if probe.returncode == 0:
-        return f'"{py}" -m {MARK}'
+        return f"{_quote(py)} -m {MARK}"
     src = Path(__file__).resolve().parent.parent
-    return f'PYTHONPATH="{src}" "{py}" -m {MARK}'
+    return f"PYTHONPATH={_quote(str(src))} {_quote(py)} -m {MARK}"
 
 
 def _load(path: Path) -> dict:
@@ -62,9 +68,14 @@ def _strip_ours(settings: dict) -> dict:
 
 def _write(path: Path, settings: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    backup = path.with_suffix(path.suffix + ".idamap.bak")
+    if path.exists() and not backup.exists():  # the first backup is the file as it was before idamap touched it
+        shutil.copy2(path, backup)
+    tmp = path.with_suffix(path.suffix + ".idamap.tmp")  # replace in one step: a crash must not leave half a file
+    tmp.write_text(json.dumps(settings, indent=2) + "\n")
     if path.exists():
-        shutil.copy2(path, path.with_suffix(path.suffix + ".idamap.bak"))
-    path.write_text(json.dumps(settings, indent=2) + "\n")
+        shutil.copymode(path, tmp)
+    os.replace(tmp, path)
 
 
 def cmd_install(a) -> int:

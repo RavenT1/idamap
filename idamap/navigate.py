@@ -107,7 +107,7 @@ def search(conn, session_id: str | None, args: dict) -> str:
     db = db_for(conn, session_id, args)
     if db is None:
         return json.dumps({"error": NO_DB})
-    query = str(args.get("query") or "").strip().lower()
+    query = str(args.get("query") or "").encode("utf-8", "replace").decode("utf-8").strip().lower()
     if not query:
         return json.dumps({"error": "query is required, e.g. \"keychain\" or \"SecItemCopyMatching\""})
     kind = str(args.get("kind") or "any").lower()
@@ -118,7 +118,7 @@ def search(conn, session_id: str | None, args: dict) -> str:
     except (TypeError, ValueError):
         limit = 20
     unexplored = args.get("unexplored_only") in (True, "true", "True", 1)
-    terms = query.split()[:6]
+    terms = [t[:200] for t in query.split()[:6]]  # SQLite refuses LIKE patterns past a few thousand characters
 
     where, params = [], []
     for t in terms:

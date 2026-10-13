@@ -13,9 +13,11 @@ from __future__ import annotations
 import os
 import plistlib
 import re
+import stat
 from pathlib import Path
 
 MAX_MEMBERS = 300
+MAX_PLIST = 8 * 1024 * 1024
 
 # Swift mangling: $s<len><Module>... (optionally after a stdlib extension prefix such as $sSa)
 _SWIFT_MOD = re.compile(r"^_*\$[sS](?:S[a-zA-Z])?(\d+)([A-Za-z_][A-Za-z0-9_]*)")
@@ -41,11 +43,20 @@ def app_root(path: str | None) -> Path | None:
     return None
 
 
+def _read_plist(path: Path) -> dict:
+    """The app under analysis may be hostile, and so may its Info.plist: a symlink to /dev/zero or to a pipe would
+    be read for ever. Only a regular file of sane size is read."""
+    st = path.stat()
+    if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_PLIST:
+        raise ValueError("not a regular, reasonably sized file")
+    with open(path, "rb") as fh:
+        return plistlib.loads(fh.read(MAX_PLIST))
+
+
 def _plist_executable(d: Path) -> str | None:
     for rel in ("Info.plist", "Contents/Info.plist", "Resources/Info.plist", "Versions/A/Resources/Info.plist"):
         try:
-            with open(d / rel, "rb") as fh:
-                value = plistlib.load(fh).get("CFBundleExecutable")
+            value = _read_plist(d / rel).get("CFBundleExecutable")
             if value:
                 return str(value)
         except Exception:  # noqa: BLE001 — missing / unreadable / malformed plist

@@ -63,6 +63,7 @@ def conn():
 
 class Handler(BaseHTTPRequestHandler):
     server_version = f"idamap/{__version__}"
+    timeout = 60  # a client that stalls in the middle of a request does not keep its thread for ever
 
     def log_message(self, fmt, *args):  # quiet
         pass
@@ -190,7 +191,7 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/calls":
                 db = int(qs["db"]) if qs.get("db") else None
                 return self._json(Q.calls(conn(), db, int(qs.get("before") or 0) or None,
-                                          min(int(qs.get("limit") or 300), 2000)))
+                                          max(1, min(int(qs.get("limit") or 300), 2000))))
             m = re.fullmatch(r"/api/db/(\d+)/(summary|compliance|functions|graph|report\.md|ida_sync\.py)", p)
             if m:
                 db, what = int(m.group(1)), m.group(2)
@@ -235,6 +236,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": ok}, 200 if ok else 400)
             m = re.fullmatch(r"/api/db/(\d+)/function/(0x[0-9a-fA-F]+)", p)
             if m:
+                if body.get("human_status") not in (None, "", *Q.HUMAN_STATUSES) or \
+                        not (body.get("note") is None or isinstance(body.get("note"), str)):
+                    return self._err(400, "unknown human_status, or a note that is not text")
                 Q.set_human(conn(), int(m.group(1)), int(m.group(2), 16),
                             status=body.get("human_status"), note=body.get("note"),
                             set_status="human_status" in body, set_note="note" in body)

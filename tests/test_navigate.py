@@ -309,13 +309,14 @@ class AutoMapTests(unittest.TestCase):
         self.t = Path(self.tmp.name)
         self.app = make_app(self.t)
         main = self.app / "Foo"
-        (self.t / "export.json").write_text(json.dumps({
+        (self.t / "exports").mkdir()
+        (self.t / "exports" / "export.json").write_text(json.dumps({
             "idb_path": str(main) + ".i64", "input_path": str(main), "sha256": "ab" * 32, "processor": "ARM", "bits": 64,
             "functions": FUNCS, "edges": EDGES, "refs": {str(k): v for k, v in REFS.items()}, "segments": []}))
         (self.t / "fake_ida.py").write_text(FAKE_IDA)
         self.log = self.t / "calls.log"
         self.env = {**os.environ, "IDAMAP_HOME": str(self.t), "PYTHONPATH": str(ROOT), "FAKE_LOG": str(self.log),
-                    "FAKE_IDB": str(main) + ".i64", "FAKE_EXPORT": str(self.t / "export.json")}
+                    "FAKE_IDB": str(main) + ".i64", "FAKE_EXPORT": str(self.t / "exports" / "export.json")}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -409,7 +410,7 @@ class AutoMapTests(unittest.TestCase):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
         seen = []
-        export = str(self.t / "export.json")
+        export = str(self.t / "exports" / "export.json")
         idb = str(self.app / "Foo") + ".i64"
 
         class Up(BaseHTTPRequestHandler):

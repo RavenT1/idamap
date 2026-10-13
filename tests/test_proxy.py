@@ -7,7 +7,6 @@ import sys
 import tempfile
 import textwrap
 import threading
-import time
 import unittest
 import urllib.error
 import urllib.request

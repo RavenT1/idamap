@@ -11,6 +11,14 @@
     earlier version is tightened.
   - The error logs (`hook_errors.log`, `proxy_errors.log`) are readable by you only, rotate at 1 MB and no longer
     contain the hook event (your prompt and the binary's output); they say what failed and for which tool.
+  - A `run_script` result that names an export file (`IDAMAP_EXPORT_FILE=...`) is only followed into idamap's own
+    `exports` directory; a hostile binary could otherwise get an arbitrary JSON file imported through the model.
+  - `Info.plist` of an app bundle is read only if it is a regular file under 8 MB (a symlink to `/dev/zero` or a pipe
+    used to hang `idamap_status`); the transcript path of a hook event must be a regular file.
+  - The Hex-Rays signature regex was quadratic on one huge identifier (20,000 characters took 4 s); the line is capped.
+  - The HTTP proxy refuses chunked request bodies instead of leaving them on the connection.
+  - The web UI clamps `limit`, accepts only known review states and text notes, and times out stalled requests.
+  - `idamap install` quotes the interpreter path properly, writes `settings.json` in one step and keeps the first backup.
   - Markdown logs HTML-escape text that comes from binaries and models; the IDA sync script title can no longer
     carry line breaks.
   - Model-facing answers and the usage hint say that names, strings and earlier explanations are data, not instructions.

@@ -152,7 +152,10 @@ class IngestTests(unittest.TestCase):
         self.assertTrue(self.h.func(MAIN)["flags"] & store.F_DISASM)
 
     def test_export_import_via_run_script(self):
-        exp = Path(self.tmp.name) / "exp.json"
+        os.environ["IDAMAP_HOME"] = self.tmp.name
+        self.addCleanup(os.environ.pop, "IDAMAP_HOME", None)
+        (Path(self.tmp.name) / "exports").mkdir()
+        exp = Path(self.tmp.name) / "exports" / "exp.json"
         exp.write_text(json.dumps({
             "idb_path": "/x/t.i64", "sha256": "ab", "processor": "ARM", "bits": 64,
             "segments": [{"name": "__text", "start": 0x1000004B0, "end": 0x100000600, "perms": "r-x", "type": "CODE"}],

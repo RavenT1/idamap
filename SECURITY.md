@@ -28,4 +28,10 @@ Out of scope: vulnerabilities in IDA Pro, ida-mcp-rs or an MCP client themselves
   explanations) is untrusted input. The model-facing tools say so, but a model can still be steered by text it
   reads; keep explanations unconfirmed until you have reviewed them.
 - The HTTP proxy puts a new port in front of ida-mcp, which can run code in IDA. It accepts only loopback `Host` and
-  `Origin` values. Do not expose it beyond localhost.
+  `Origin` values (any local port: another web app running on localhost could reach it, so use the stdio proxy
+  unless you need HTTP). Do not expose it beyond localhost.
+- A `run_script` result can name an export file (`IDAMAP_EXPORT_FILE=...`), and a hostile binary can talk a model into
+  printing one. idamap only imports files from its own `exports` directory; `idamap import <file>` takes a path from
+  you.
+- A hostile app bundle is read with limits: `Info.plist` must be a regular file under 8 MB, and a transcript path from
+  a hook event must be a regular file.

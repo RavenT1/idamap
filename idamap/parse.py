@@ -172,13 +172,14 @@ def try_json(text: str) -> Any:
 
 
 _SIG = re.compile(r"([A-Za-z_$?@.~][\w$?@.~:<>]*)\s*\(")
+LINE_LIMIT = 2000
 _CALLCONV = {"__fastcall", "__cdecl", "__stdcall", "__thiscall", "__usercall", "__userpurge", "__noreturn"}
 
 
 def decompiled_name(code: str) -> str | None:
     """Best-effort function name from the first line of Hex-Rays output."""
     for line in code.splitlines():
-        line = line.strip()
+        line = line.strip()[:LINE_LIMIT]  # the signature regex is quadratic on one huge identifier
         if not line or line.startswith("//"):
             continue
         for m in _SIG.finditer(line):

@@ -306,6 +306,26 @@ def add_edges(conn, db_id: int, edges: list[tuple[int, int]], source: str) -> No
 # Full-map import (produced by ida_scripts/export_map.py)
 # --------------------------------------------------------------------------
 
+MAX_EXPORT_BYTES = 512 * 1024 * 1024
+
+
+def export_path_ok(path) -> bool:
+    """May this path, named in a ``run_script`` result, be imported as a map export?
+
+    The line comes from tool output, and a hostile binary can talk the model into printing one. Only files in
+    idamap's own exports directory (where export_map.py writes) are followed. ``idamap import <file>`` takes a
+    path from you and is not restricted."""
+    if not isinstance(path, str) or not path:
+        return False
+    try:
+        real = os.path.realpath(path)
+        roots = {os.path.realpath(S.home() / "exports"), os.path.realpath(os.path.expanduser("~/.idamap/exports"))}
+        return (any(real.startswith(r + os.sep) for r in roots) and os.path.isfile(real)
+                and os.path.getsize(real) <= MAX_EXPORT_BYTES)
+    except (OSError, ValueError):
+        return False
+
+
 def import_export(conn, path: str, db_id: int | None = None) -> dict:
     with open(path, "r", encoding="utf-8") as fh:
         data = json.load(fh)
@@ -587,5 +607,5 @@ def on_post(conn, payload: dict, ok: bool) -> None:
         conn.execute("ROLLBACK")
         raise
 
-    if facts.export_file and os.path.exists(facts.export_file):
+    if facts.export_file and export_path_ok(facts.export_file):
         import_export(conn, facts.export_file, db_id)

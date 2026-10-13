@@ -17,6 +17,12 @@ TAIL_BYTES = 2 * 1024 * 1024
 MAX_INTENT = 700
 
 
+def _is_file(path) -> bool:
+    """The hook event names the transcript. Only a real file path is opened: not a number (which open() would
+    take for a file descriptor), and not a device or pipe that never ends."""
+    return isinstance(path, str) and bool(path) and os.path.isfile(path)
+
+
 def _tail_lines(path: str, nbytes: int = TAIL_BYTES) -> list[str]:
     size = os.path.getsize(path)
     with open(path, "rb") as fh:
@@ -46,7 +52,7 @@ def intent_for(transcript_path: str | None, tool_use_id: str | None) -> str | No
     writes the current assistant message only after PreToolUse fires, so
     guessing from "the latest text" would attach the *previous* call's intent.
     """
-    if not transcript_path or not os.path.exists(transcript_path):
+    if not _is_file(transcript_path):
         return None
     try:
         entries = []
@@ -94,7 +100,7 @@ def intent_for(transcript_path: str | None, tool_use_id: str | None) -> str | No
 
 
 def prompt_text(transcript_path: str | None, prompt_id: str | None) -> str | None:
-    if not transcript_path or not prompt_id or not os.path.exists(transcript_path):
+    if not _is_file(transcript_path) or not isinstance(prompt_id, str) or not prompt_id:
         return None
     try:
         with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:

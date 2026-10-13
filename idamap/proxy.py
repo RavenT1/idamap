@@ -243,7 +243,7 @@ class Observer:
                 why = f"{type(e).__name__}: {e}"
             m = _re.search(r"IDAMAP_EXPORT_FILE=(.+?) functions=\d+", text or "")
             path = m.group(1) if m else None
-            if not path or not os.path.exists(path):
+            if not path or not ingest.export_path_ok(path):
                 why = why or ("ida-mcp did not run the export script" + (f": {text[:160]}" if text else
                               " (is it started with --read-only, or is no database open?)"))
                 self.map_failed[db] = why
@@ -673,6 +673,10 @@ def make_http_proxy(listen: str, upstream: str, harness: str | None = None,
         def _forward(self, method: str):
             if not self._allowed():
                 return
+            if self.headers.get("Transfer-Encoding"):
+                # the body length is read from Content-Length only: a chunked body would be left on the connection
+                # and parsed as the next request
+                return self._refuse(411, "chunked request bodies are not supported; send Content-Length")
             try:
                 n = int(self.headers.get("Content-Length") or 0)
             except ValueError:

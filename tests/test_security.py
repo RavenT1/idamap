@@ -5,18 +5,19 @@ import http.client
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
 import tempfile
 import threading
 import unittest
-import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from idamap import annotate, proxy, report, server, store
+from idamap import annotate, bundle, cli, ingest, navigate, parse, proxy, report, server, store, transcript
 from tests.test_compliance import MAIN, Base
+from tests.test_ingest import Harness
 
 
 def serve(handler=server.Handler, token=None):
@@ -210,8 +211,56 @@ class ProxyHttpGuardTests(unittest.TestCase):
         self.assertEqual(self.post(length=proxy.MAX_HTTP_BODY + 1), 413)
         self.assertEqual(self.post(length=-5), 413)
 
+    def test_a_chunked_request_is_refused_instead_of_left_on_the_connection(self):
+        before = len(self.seen)
+        self.assertEqual(self.post({"Transfer-Encoding": "chunked"}), 411)
+        self.assertEqual(len(self.seen), before)
 
-@unittest.skipUnless(os.name == "posix", "permission bits")
+
+class HookInstallTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def args(self):
+        import argparse
+        return argparse.Namespace(scope="project", project_dir=str(self.dir), matcher="mcp__ida.*")
+
+    @unittest.skipUnless(os.name == "posix", "shell quoting")
+    def test_an_awkward_interpreter_path_stays_one_shell_argument(self):
+        from unittest import mock
+        py = "/tmp/my dir/it's $(touch pwned)/python"
+        with mock.patch.object(cli.sys, "executable", py), \
+                mock.patch.object(cli.subprocess, "run", return_value=mock.Mock(returncode=0)):
+            self.assertEqual(shlex.split(cli._hook_command()), [py, "-m", cli.MARK])
+
+    def test_install_keeps_the_first_backup_and_leaves_no_temp_file(self):
+        settings = self.dir / ".claude" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({"model": "mine", "hooks": {}}))
+        for _ in range(2):  # a second install must not overwrite the backup with an already-changed file
+            with mock_stdout():
+                cli.cmd_install(self.args())
+        backup = Path(str(settings) + ".idamap.bak")
+        self.assertEqual(json.loads(backup.read_text()), {"model": "mine", "hooks": {}})
+        data = json.loads(settings.read_text())
+        self.assertEqual(data["model"], "mine")
+        self.assertEqual(len(data["hooks"]["PostToolUse"]), 1)  # replaced, not duplicated
+        self.assertEqual([p.name for p in settings.parent.iterdir() if p.name.endswith(".tmp")], [])
+        with mock_stdout():
+            cli.cmd_uninstall(self.args())
+        self.assertEqual(json.loads(settings.read_text()), {"model": "mine"})
+
+
+def mock_stdout():
+    import contextlib
+    import io
+    return contextlib.redirect_stdout(io.StringIO())
+
+
 class WebHardeningTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -231,6 +280,26 @@ class WebHardeningTests(unittest.TestCase):
             self.assertEqual(status, 404, path)
             self.assertNotIn(b"import sqlite3", body, path)
         self.assertEqual(get(self.httpd.server_port, "/app.js")[0], 200)
+
+    def post(self, path, body):
+        conn = http.client.HTTPConnection("127.0.0.1", self.httpd.server_port, timeout=10)
+        conn.request("POST", path, json.dumps(body), {"Content-Type": "application/json"})
+        r = conn.getresponse()
+        r.read()
+        conn.close()
+        return r.status
+
+    def test_only_known_review_states_and_text_notes_are_stored(self):
+        f = "/api/db/1/function/0x1000"
+        self.assertEqual(self.post(f, {"human_status": "suspicious"}), 200)
+        self.assertEqual(self.post(f, {"human_status": None}), 200)
+        self.assertEqual(self.post(f, {"human_status": "<img src=x onerror=alert(1)>"}), 400)
+        self.assertEqual(self.post(f, {"note": {"a": 1}}), 400)
+        self.assertEqual(self.post(f, {"note": "my note"}), 200)
+
+    def test_a_negative_limit_does_not_mean_everything(self):
+        self.assertEqual(get(self.httpd.server_port, "/api/calls?limit=-1")[0], 200)
+        self.assertEqual(get(self.httpd.server_port, "/api/calls?limit=0")[0], 200)
 
     def test_a_header_value_cannot_carry_a_line_break(self):
         self.assertEqual(server._clean("a\r\nSet-Cookie: x=1"), "a  Set-Cookie: x=1")
@@ -262,6 +331,100 @@ class _HomeCase(unittest.TestCase):
         return stat.S_IMODE(os.stat(p).st_mode)
 
 
+class ForgedExportMarkerTests(_HomeCase):
+    """A ``run_script`` result can say IDAMAP_EXPORT_FILE=<path>. A hostile binary can talk the model into printing
+    one, so only idamap's own exports directory may be followed."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = Path(self.tmp.name)
+        os.environ["IDAMAP_HOME"] = str(self.home)
+        self.conn = store.connect()
+        self.h = Harness(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+        super().tearDown()
+
+    def export(self, where):
+        where.mkdir(exist_ok=True)
+        p = where / "forged.json"
+        p.write_text(json.dumps({"idb_path": "/forged/x.i64", "functions": [[0x1000, 0x1010, "fake_fn"]], "edges": []}))
+        return p
+
+    def say(self, p):
+        self.h.call("run_script", {"code": "print(1)"},
+                    {"stdout": f"IDAMAP_EXPORT_FILE={p} functions=1\n", "success": True})
+
+    def imported(self):
+        return self.conn.execute("SELECT count(*) FROM functions WHERE name='fake_fn'").fetchone()[0]
+
+    def test_a_file_outside_the_exports_directory_is_not_imported(self):
+        self.say(self.export(self.home / "elsewhere"))
+        self.assertEqual(self.imported(), 0)
+
+    def test_a_symlink_that_leaves_the_exports_directory_is_not_followed(self):
+        target = self.export(self.home / "elsewhere")
+        (self.home / "exports").mkdir()
+        (self.home / "exports" / "link.json").symlink_to(target)
+        self.say(self.home / "exports" / "link.json")
+        self.assertEqual(self.imported(), 0)
+
+    def test_a_device_or_a_number_is_not_a_path(self):
+        for bad in ("/dev/zero", "../../etc/passwd", True, 1, None):
+            self.assertFalse(ingest.export_path_ok(bad), bad)
+
+    def test_the_exports_directory_is_followed(self):
+        self.say(self.export(self.home / "exports"))
+        self.assertEqual(self.imported(), 1)
+
+
+class HostileInputLimitsTests(_HomeCase):
+    def test_a_transcript_path_must_be_a_real_file(self):
+        for bad in (True, 1, ["x"], "/dev/zero", "/dev/null", self.tmp.name):
+            self.assertIsNone(transcript.intent_for(bad, "tu1"), bad)
+            self.assertIsNone(transcript.prompt_text(bad, "p1"), bad)
+
+    @unittest.skipUnless(os.name == "posix", "pipes")
+    def test_a_hostile_info_plist_is_not_read_for_ever(self):
+        import plistlib
+        good = Path(self.tmp.name) / "Good.app"
+        good.mkdir()
+        (good / "Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": "Real"}))
+        self.assertEqual(bundle._plist_executable(good), "Real")
+        pipe = Path(self.tmp.name) / "Pipe.app"
+        pipe.mkdir()
+        os.mkfifo(pipe / "Info.plist")  # open() on this would wait for a writer that never comes
+        link = Path(self.tmp.name) / "Link.app"
+        link.mkdir()
+        (link / "Info.plist").symlink_to("/dev/zero")
+        big = Path(self.tmp.name) / "Big.app"
+        big.mkdir()
+        with open(big / "Info.plist", "wb") as fh:
+            fh.truncate(bundle.MAX_PLIST + 1)
+        for d in (pipe, link, big):
+            self.assertIsNone(bundle._plist_executable(d), d.name)
+
+    def test_one_enormous_identifier_does_not_stall_the_name_parser(self):
+        import time
+        t = time.time()
+        parse.decompiled_name("a" * 200_000)
+        self.assertLess(time.time() - t, 1.0)
+
+    def test_search_survives_a_huge_term_and_lone_surrogates(self):
+        os.environ["IDAMAP_HOME"] = self.tmp.name
+        conn = store.connect()
+        exp = Path(self.tmp.name) / "exports"
+        exp.mkdir()
+        (exp / "m.json").write_text(json.dumps({"idb_path": "/m.i64", "functions": [[0x1000, 0x1010, "_main"]], "edges": []}))
+        ingest.import_export(conn, str(exp / "m.json"))
+        for q in ("a" * 100_000, "x\ud800y", "%" * 5000):
+            out = json.loads(navigate.search(conn, None, {"query": q}))
+            self.assertNotIn("Error", json.dumps(out)[:40])
+        conn.close()
+
+
+@unittest.skipUnless(os.name == "posix", "permission bits")
 class StateDirectoryTests(_HomeCase):
     def test_a_new_state_directory_and_database_are_private(self):
         home = Path(self.tmp.name) / "new-home"
@@ -292,6 +455,7 @@ class StateDirectoryTests(_HomeCase):
         self.assertEqual(self.mode(d), 0o755)
 
 
+@unittest.skipUnless(os.name == "posix", "permission bits")
 class LogTests(_HomeCase):
     def setUp(self):
         super().setUp()
