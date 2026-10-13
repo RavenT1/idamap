@@ -188,11 +188,13 @@ def main():
         "refs": refs,
         "refs_complete": refs_complete,
     }
-    out_dir = os.path.join(os.environ.get("IDAMAP_HOME") or os.path.expanduser("~/.idamap"), "exports")
-    os.makedirs(out_dir, exist_ok=True)
+    home = os.environ.get("IDAMAP_HOME") or os.path.expanduser("~/.idamap")
+    os.makedirs(home, mode=0o700, exist_ok=True)  # names and strings of the analysed binary: readable by you only
+    out_dir = os.path.join(home, "exports")
+    os.makedirs(out_dir, mode=0o700, exist_ok=True)
     base = os.path.splitext(os.path.basename(idb_path or "idb"))[0]
     path = os.path.join(out_dir, "%s-%s.json" % (base, (sha or "nosha")[:8]))
-    with open(path, "w") as fh:
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
         json.dump(data, fh)
     print("IDAMAP_EXPORT_FILE=%s functions=%d edges=%d refs=%d%s (%.1fs)"
           % (path, len(funcs), len(edges), sum(len(v) for v in refs.values()),
